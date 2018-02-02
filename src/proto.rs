@@ -9,7 +9,7 @@ use nom;
 use num::FromPrimitive;
 
 use errors::NtlmError;
-use errors::ParseError::MismatchedSignature;
+use errors::ParseError::{MismatchedMsgType, MismatchedSignature};
 
 /// A 16-bit unsigned integer that defines the information type in the Value field.
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
@@ -176,8 +176,6 @@ pub const NTLMSSP_REVISION_W2K3: u8 = 0x0f;
 /// This message allows the client to specify its supported NTLM options to the server.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NegotiateMessage<'a> {
-    /// A 32-bit unsigned integer that indicates the message type.
-    pub msg_type: MessageType,
     /// The client sets flags to indicate options it supports.
     pub flags: NegotiateFlags,
     /// A field containing DomainName information.
@@ -187,9 +185,6 @@ pub struct NegotiateMessage<'a> {
     /// This structure should be used for debugging purposes only.
     pub version: Option<Version>,
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AuthenticateMessage {}
 
 impl<'a> NegotiateMessage<'a> {
     pub fn parse(payload: &'a [u8]) -> Result<NegotiateMessage<'a>, Error> {
@@ -240,7 +235,7 @@ impl<'a> NegotiateMessage<'a> {
         };
 
         buf.put_slice(kSignature);
-        buf.put_u32::<LittleEndian>(self.msg_type as u32);
+        buf.put_u32::<LittleEndian>(MessageType::Negotiate as u32);
 
         let mut flags = self.flags;
 
@@ -307,8 +302,6 @@ impl<'a> NegotiateMessage<'a> {
 /// the `NegotiateMessage` (section 2.2.1.1) from the client.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChallengeMessage<'a> {
-    /// A 32-bit unsigned integer that indicates the message type.
-    pub msg_type: MessageType,
     /// The server sets flags to indicate options it supports or,
     /// if there has been a `NegotiateMessage` (section 2.2.1.1),
     /// the choices it has made from the options offered by the client.
@@ -377,7 +370,7 @@ impl<'a> ChallengeMessage<'a> {
         };
 
         buf.put_slice(kSignature);
-        buf.put_u32::<LittleEndian>(self.msg_type as u32);
+        buf.put_u32::<LittleEndian>(MessageType::Challenge as u32);
 
         if let Some(ref target_name) = self.target_name {
             buf.put_u16::<LittleEndian>(target_name.len() as u16);
@@ -451,6 +444,9 @@ impl<'a> ChallengeMessage<'a> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthenticateMessage {}
+
 #[macro_export]
 macro_rules! utf16 {
     ($s:expr) => {
@@ -495,7 +491,13 @@ named!(
                 nom::ErrorKind::Custom(MismatchedSignature as u32),
                 verify!(take!(8), |signature| signature == kSignature)
             ) >>
-        msg_type: map_opt!(nom::le_u32, |v| MessageType::from_u32(v)) >>
+        _msg_type: add_return_error!(
+                nom::ErrorKind::Custom(MismatchedMsgType as u32),
+                verify!(
+                    map_opt!(nom::le_u32, |v| MessageType::from_u32(v)),
+                    |msg_type| msg_type == MessageType::Negotiate
+                )
+            ) >>
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
         domain_name_field: call!(parse_field) >>
         workstation_name_field: call!(parse_field) >>
@@ -506,7 +508,6 @@ named!(
             ) >>
         (
             NegotiateMessage {
-                msg_type,
                 flags,
                 domain_name: None,
                 workstation_name: None,
@@ -527,7 +528,13 @@ named!(
                 nom::ErrorKind::Custom(MismatchedSignature as u32),
                 verify!(take!(8), |signature| signature == kSignature)
             ) >>
-        msg_type: map_opt!(nom::le_u32, |v| MessageType::from_u32(v)) >>
+        _msg_type: add_return_error!(
+                nom::ErrorKind::Custom(MismatchedMsgType as u32),
+                verify!(
+                    map_opt!(nom::le_u32, |v| MessageType::from_u32(v)),
+                    |msg_type| msg_type == MessageType::Challenge
+                )
+            ) >>
         target_name_field: call!(parse_field) >>
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
         server_challenge: call!(nom::le_u64) >>
@@ -540,7 +547,6 @@ named!(
             ) >>
         (
             ChallengeMessage {
-                msg_type,
                 flags,
                 server_challenge,
                 target_name: None,
@@ -617,7 +623,6 @@ mod tests {
         ];
 
         let message = NegotiateMessage {
-            msg_type: MessageType::Negotiate,
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLM_NEGOTIATE_OEM
                 | NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED
@@ -704,7 +709,6 @@ mod tests {
         ];
 
         let message = ChallengeMessage {
-            msg_type: MessageType::Challenge,
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
                 | NegotiateFlags::NTLMSSP_TARGET_TYPE_DOMAIN
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO,

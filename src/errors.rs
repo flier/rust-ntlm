@@ -1,4 +1,3 @@
-use failure;
 use nom;
 use num::FromPrimitive;
 
@@ -9,6 +8,8 @@ pub enum NtlmError {
     #[fail(display = "invalid message, {:?}", _0)] InvalidMessage(nom::ErrorKind),
 
     #[fail(display = "message signature mismatched")] MismatchedSignature,
+
+    #[fail(display = "message type mismatched")] MismatchedMsgType,
 
     #[fail(display = "message offset overflow")] OffsetOverflow,
 }
@@ -39,6 +40,7 @@ impl From<nom::ErrorKind> for NtlmError {
         match err {
             nom::ErrorKind::Custom(code) => match ParseError::from_u32(code) {
                 Some(ParseError::MismatchedSignature) => NtlmError::MismatchedSignature,
+                Some(ParseError::MismatchedMsgType) => NtlmError::MismatchedMsgType,
                 None => NtlmError::InvalidMessage(err),
             },
             _ => NtlmError::InvalidMessage(err),
@@ -50,4 +52,5 @@ impl From<nom::ErrorKind> for NtlmError {
 #[derive(Clone, Copy, Debug, FromPrimitive, PartialEq)]
 pub enum ParseError {
     MismatchedSignature,
+    MismatchedMsgType,
 }
