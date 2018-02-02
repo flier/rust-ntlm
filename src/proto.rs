@@ -202,18 +202,14 @@ impl<'a> NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(
-                        domain_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(
-                        workstation_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
                 }
 
                 Ok(msg)
@@ -304,9 +300,7 @@ impl<'a> ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(
-                        target_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
@@ -367,9 +361,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| {
-                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
-                })
+                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -611,8 +603,8 @@ impl<'a> AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && encrypted_random_session_key_field.length > 0
                 {
-                    msg.encrypted_random_session_key = Some(Cow::from(encrypted_random_session_key_field
-                        .extract_data(remaining, offset)?))
+                    msg.encrypted_random_session_key =
+                        Some(Cow::from(encrypted_random_session_key_field.extract_data(remaining, offset)?))
                 }
 
                 Ok(msg)
@@ -625,22 +617,36 @@ impl<'a> AuthenticateMessage<'a> {
 
 impl<'a> WriteTo for AuthenticateMessage<'a> {
     fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
-        let mut offset = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 6 + if self.version.is_some() {
-            kVersionSize
-        } else {
-            0
-        };
+        let header_size = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 6
+            + if self.version.is_some() {
+                kVersionSize
+            } else {
+                0
+            };
 
         buf.put_slice(kSignature);
         buf.put_u32::<LittleEndian>(MessageType::Authenticate as u32);
 
-        offset += self.lm_challenge_response.write_field(buf, offset)?;
-        offset += self.nt_challenge_response.write_field(buf, offset)?;
+        let mut offset = header_size;
+        let mut response_offset =
+            header_size + self.domain_name.len() + self.user_name.len() + self.workstation_name.len();
+
+        response_offset += self.lm_challenge_response
+            .write_field(buf, response_offset)?;
+        response_offset += self.nt_challenge_response
+            .write_field(buf, response_offset)?;
 
         offset += self.domain_name.write_field(buf, offset)?;
         offset += self.user_name.write_field(buf, offset)?;
         offset += self.workstation_name.write_field(buf, offset)?;
-        offset += self.encrypted_random_session_key.write_field(buf, offset)?;
+
+        debug_assert_eq!(
+            offset,
+            header_size + self.domain_name.len() + self.user_name.len() + self.workstation_name.len()
+        );
+
+        response_offset += self.encrypted_random_session_key
+            .write_field(buf, response_offset)?;
 
         let mut flags = self.flags;
 
@@ -662,14 +668,16 @@ impl<'a> WriteTo for AuthenticateMessage<'a> {
             buf.put_slice(mic);
         }
 
-        self.lm_challenge_response.write_to(buf)?;
-        self.nt_challenge_response.write_to(buf)?;
         self.domain_name.write_to(buf)?;
         self.user_name.write_to(buf)?;
         self.workstation_name.write_to(buf)?;
+
+        self.lm_challenge_response.write_to(buf)?;
+        self.nt_challenge_response.write_to(buf)?;
+
         self.encrypted_random_session_key.write_to(buf)?;
 
-        Ok(offset)
+        Ok(response_offset)
     }
 }
 
@@ -1191,58 +1199,14 @@ mod tests {
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM,
             lm_challenge_response: LmChallengeResponse::V1 {
                 response: Cow::from(vec![
-                    0xc3,
-                    0x37,
-                    0xcd,
-                    0x5c,
-                    0xbd,
-                    0x44,
-                    0xfc,
-                    0x97,
-                    0x82,
-                    0xa6,
-                    0x67,
-                    0xaf,
-                    0x6d,
-                    0x42,
-                    0x7c,
-                    0x6d,
-                    0xe6,
-                    0x7c,
-                    0x20,
-                    0xc2,
-                    0xd3,
-                    0xe7,
-                    0x7c,
-                    0x56,
+                    0xc3, 0x37, 0xcd, 0x5c, 0xbd, 0x44, 0xfc, 0x97, 0x82, 0xa6, 0x67, 0xaf, 0x6d, 0x42, 0x7c, 0x6d,
+                    0xe6, 0x7c, 0x20, 0xc2, 0xd3, 0xe7, 0x7c, 0x56,
                 ]),
             },
             nt_challenge_response: NtChallengeResponse::V1 {
                 response: Cow::from(vec![
-                    0x25,
-                    0xa9,
-                    0x8c,
-                    0x1c,
-                    0x31,
-                    0xe8,
-                    0x18,
-                    0x47,
-                    0x46,
-                    0x6b,
-                    0x29,
-                    0xb2,
-                    0xdf,
-                    0x46,
-                    0x80,
-                    0xf3,
-                    0x99,
-                    0x58,
-                    0xfb,
-                    0x8c,
-                    0x21,
-                    0x3a,
-                    0x9c,
-                    0xc6,
+                    0x25, 0xa9, 0x8c, 0x1c, 0x31, 0xe8, 0x18, 0x47, 0x46, 0x6b, 0x29, 0xb2, 0xdf, 0x46, 0x80, 0xf3,
+                    0x99, 0x58, 0xfb, 0x8c, 0x21, 0x3a, 0x9c, 0xc6,
                 ]),
             },
             domain_name: utf16!("DOMAIN"),
@@ -1254,5 +1218,10 @@ mod tests {
         };
 
         assert_eq!(AuthenticateMessage::parse(packet).unwrap(), message);
+
+        let mut buf: Vec<u8> = vec![];
+
+        assert_eq!(message.write_to(&mut buf).unwrap(), packet.len());
+        assert_eq!(buf.as_slice(), packet);
     }
 }
