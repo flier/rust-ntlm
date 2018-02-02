@@ -13,6 +13,8 @@ log = "0.4"
 num = "0.1"
 num-derive= "0.1"
 
+clippy = { version = "*", optional = true }
+
 [dependencies.nom]
 version = "3.2"
 features = ["verbose-errors"]
