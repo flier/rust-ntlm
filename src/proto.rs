@@ -53,13 +53,6 @@ impl<'a> AvPair<'a> {
         AvPair { id, value }
     }
 
-    pub fn eol() -> AvPair<'a> {
-        AvPair {
-            id: AvId::EOL,
-            value: Default::default(),
-        }
-    }
-
     pub fn size(&self) -> usize {
         kAvIdSize + kAvLenSize + self.value.as_ref().len()
     }
@@ -72,6 +65,66 @@ impl<'a> WriteTo for AvPair<'a> {
         buf.put_slice(self.value.as_ref());
 
         Ok(self.size())
+    }
+}
+
+#[macro_export]
+macro_rules! utf16 {
+    ($s:expr) => {
+        ::encoding::Encoding::encode(
+            &::encoding::codec::utf_16::UTF_16LE_ENCODING,
+            $s,
+            ::encoding::EncoderTrap::Ignore
+        ).unwrap().into()
+    };
+}
+
+pub fn eol<'a>() -> AvPair<'a> {
+    AvPair {
+        id: AvId::EOL,
+        value: Default::default(),
+    }
+}
+
+pub fn nb_computer_name(computer_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::NbComputerName,
+        value: utf16!(computer_name),
+    }
+}
+
+pub fn nb_domain_name(domain_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::NbDomainName,
+        value: utf16!(domain_name),
+    }
+}
+
+pub fn dns_computer_name(computer_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::DnsComputerName,
+        value: utf16!(computer_name),
+    }
+}
+
+pub fn dns_domain_name(domain_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::DnsDomainName,
+        value: utf16!(domain_name),
+    }
+}
+
+pub fn dns_tree_name(tree_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::DnsTreeName,
+        value: utf16!(tree_name),
+    }
+}
+
+pub fn target_name(target_name: &str) -> AvPair {
+    AvPair {
+        id: AvId::TargetName,
+        value: utf16!(target_name),
     }
 }
 
@@ -681,17 +734,6 @@ impl<'a> WriteTo for AuthenticateMessage<'a> {
     }
 }
 
-#[macro_export]
-macro_rules! utf16 {
-    ($s:expr) => {
-        ::encoding::Encoding::encode(
-            &::encoding::codec::utf_16::UTF_16LE_ENCODING,
-            $s,
-            ::encoding::EncoderTrap::Ignore
-        ).unwrap().into()
-    };
-}
-
 const kSignature: &[u8] = b"NTLMSSP\0";
 const kSignatureSize: usize = 8;
 const kMesssageTypeSize: usize = 4;
@@ -1129,11 +1171,11 @@ mod tests {
             server_challenge: 0x0807060504030201,
             target_name: Some(utf16!("DOMAIN")),
             target_info: Some(vec![
-                AvPair::new(AvId::NbDomainName, utf16!("DOMAIN")),
-                AvPair::new(AvId::NbComputerName, utf16!("SERVER")),
-                AvPair::new(AvId::DnsDomainName, utf16!("domain.com")),
-                AvPair::new(AvId::DnsComputerName, utf16!("server.domain.com")),
-                AvPair::eol(),
+                nb_domain_name("DOMAIN"),
+                nb_computer_name("SERVER"),
+                dns_domain_name("domain.com"),
+                dns_computer_name("server.domain.com"),
+                eol(),
             ]),
             version: None,
         };
