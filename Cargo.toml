@@ -1,0 +1,21 @@
+[package]
+name = "ntlm"
+version = "0.1.0"
+authors = ["Flier Lu <flier.lu@gmail.com>"]
+
+[dependencies]
+failure = "0.1"
+byteorder = "1.2"
+bytes = "0.4"
+bitflags = "1.0"
+encoding = "0.2"
+log = "0.4"
+num = "0.1"
+num-derive= "0.1"
+
+[dependencies.nom]
+version = "3.2"
+features = ["verbose-errors"]
+
+[dev-dependencies]
+pretty_env_logger = "0.2"
