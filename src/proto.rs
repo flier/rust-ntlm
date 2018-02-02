@@ -158,6 +158,8 @@ bitflags! {
         const NTLMSSP_NEGOTIATE_LM_KEY = 0x0000_0080;
         /// If set, requests usage of the NTLM v1 session security protocol.
         const NTLMSSP_NEGOTIATE_NTLM = 0x0000_0200;
+        /// If set, the connection SHOULD be anonymous.
+        const NTLMSSP_NEGOTIATE_ANONYMOUS = 0x0000_0800;
         /// If set, the domain name is provided (section 2.2.1.1).
         const NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED = 0x0000_1000;
         /// This flag indicates whether the Workstation field is present.
