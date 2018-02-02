@@ -445,7 +445,60 @@ impl<'a> ChallengeMessage<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AuthenticateMessage {}
+pub enum LmChallengeResponse<'a> {
+    V1 {
+        response: Cow<'a, [u8]>,
+    },
+    V2 {
+        response: Cow<'a, [u8]>,
+        challenge: Cow<'a, [u8]>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NtChallengeResponse<'a> {
+    V1 {
+        response: Cow<'a, [u8]>,
+    },
+    V2 {
+        response: Cow<'a, [u8]>,
+        challenge: NtlmClientChalenge<'a>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NtlmClientChalenge<'a> {
+    timestamp: u64,
+    challenge: Cow<'a, [u8]>,
+    context: Vec<AvPair<'a>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthenticateMessage<'a> {
+    /// A field containing `LmChallengeResponse` information.
+    pub lm_challenge_response: LmChallengeResponse<'a>,
+    // A field containing `NtChallengeResponse` information.
+    pub nt_challenge_response: NtChallengeResponse<'a>,
+    /// A field containing DomainName information.
+    pub domain_name: Cow<'a, [u8]>,
+    /// A field containing UserName information.
+    pub user_name: Cow<'a, [u8]>,
+    /// A field containing Workstation information.
+    pub workstation_name: Cow<'a, [u8]>,
+    /// A field containing EncryptedRandomSessionKey information.
+    pub encrypted_random_session_key: Option<Cow<'a, [u8]>>,
+    /// In connectionless mode, a NEGOTIATE structure that contains a set of flags (section 2.2.2.5)
+    /// and represents the conclusion of negotiation—the choices the client has made from the options
+    /// the server offered in the CHALLENGE_MESSAGE.
+    ///
+    /// In connection-oriented mode, a NEGOTIATE structure that contains the set of bit flags (section 2.2.2.5)
+    /// negotiated in the previous messages.
+    pub flags: NegotiateFlags,
+    /// This structure should be used for debugging purposes only.
+    pub version: Option<Version>,
+    /// The message integrity for the NTLM `NegotiateMessage`, `ChallengeMessage`, and `AuthenticateMessage`.
+    pub mic: Cow<'a, [u8]>,
+}
 
 #[macro_export]
 macro_rules! utf16 {
@@ -556,6 +609,69 @@ named!(
             target_name_field,
             target_info_field
         )
+    )
+);
+
+named!(
+    parse_lm_response<LmChallengeResponse>,
+    do_parse!(
+    response: take!(24) >>
+    (LmChallengeResponse::V1{
+        response: response.into()
+    })
+)
+);
+
+named!(
+    parse_lm_response_v2<LmChallengeResponse>,
+    do_parse!(
+    response: take!(16) >>
+    challenge: take!(8) >>
+    (LmChallengeResponse::V2{
+        response: response.into(),
+        challenge: challenge.into(),
+    })
+)
+);
+
+named!(
+    parse_nt_response<NtChallengeResponse>,
+    do_parse!(
+    response: take!(24) >>
+    (NtChallengeResponse::V1{
+        response: response.into()
+    })
+)
+);
+
+named!(
+    parse_nt_response_v2<NtChallengeResponse>,
+    do_parse!(
+    response: take!(16) >>
+    challenge: call!(parse_ntlm_client_challenge) >>
+    (NtChallengeResponse::V2{
+        response: response.into(),
+        challenge,
+    })
+)
+);
+
+named!(
+    parse_ntlm_client_challenge<NtlmClientChalenge>,
+    do_parse!(
+        _resp_type: verify!(call!(nom::le_u8), |v| v == 1) >>
+        _hi_resp_type: verify!(call!(nom::le_u8), |v| v== 1) >>
+        _reserved1: take!(2) >>
+        _reserved2: take!(4) >>
+        timestamp: call!(nom::le_u64) >>
+        challenge: take!(8) >>
+        _reserved3: take!(4) >>
+        context: parse_av_pairs >>
+        (NtlmClientChalenge {
+            timestamp,
+            challenge: challenge.into(),
+            context,
+        })
     )
 );
 
