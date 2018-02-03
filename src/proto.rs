@@ -1,12 +1,26 @@
 #![allow(non_upper_case_globals)]
 
 use std::borrow::Cow;
+use std::io::Cursor;
+use std::iter;
+use std::mem;
 
-use byteorder::LittleEndian;
-use bytes::BufMut;
+use byteorder::{ByteOrder, LittleEndian};
+use bytes::{Buf, BufMut};
+use encoding::{DecoderTrap, EncoderTrap, Encoding};
+use encoding::codec::utf_16::UTF_16LE_ENCODING;
+
 use failure::Error;
+use generic_array::GenericArray;
 use nom;
 use num::FromPrimitive;
+use time::Timespec;
+
+use crypto::hmac::Hmac;
+use crypto::mac::Mac;
+use crypto::md5::Md5;
+use des::{BlockCipher, Des};
+use md4::{Digest, Md4};
 
 use errors::NtlmError;
 use errors::ParseError::{MismatchedMsgType, MismatchedSignature};
@@ -39,6 +53,19 @@ pub enum AvId {
     ChannelBindings,
 }
 
+bitflags! {
+    /// A 32-bit value indicating server or client configuration.
+    pub struct MsvAvFlags: u32 {
+        /// Indicates to the client that the account authentication is constrained.
+        const AccountAuthenticationContrained = 0x0000_0001;
+        /// Indicates that the client is providing message integrity in the MIC field
+        /// (section 2.2.1.3) in the AUTHENTICATE_MESSAGE.
+        const ProvidingMessageIntegrityMIC = 0x0000_0002;
+        /// Indicates that the client is providing a target SPN generated from an untrusted source.
+        const TargetSPNFromUntrustedSource = 0x0000_0004;
+    }
+}
+
 /// The `AvPair` structure defines an attribute/value pair.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AvPair<'a> {
@@ -56,6 +83,49 @@ impl<'a> AvPair<'a> {
     pub fn size(&self) -> usize {
         kAvIdSize + kAvLenSize + self.value.as_ref().len()
     }
+
+    pub fn to_str(&self) -> Option<String> {
+        match self.id {
+            AvId::NbComputerName
+            | AvId::NbDomainName
+            | AvId::DnsComputerName
+            | AvId::DnsDomainName
+            | AvId::DnsTreeName
+            | AvId::TargetName => UTF_16LE_ENCODING
+                .decode(self.value.as_ref(), DecoderTrap::Ignore)
+                .ok(),
+            _ => None,
+        }
+    }
+
+    pub fn to_flags(&self) -> Option<MsvAvFlags> {
+        if self.id == AvId::Flags && self.value.len() >= mem::size_of::<u32>() {
+            MsvAvFlags::from_bits(LittleEndian::read_u32(self.value.as_ref()))
+        } else {
+            None
+        }
+    }
+
+    pub fn to_single_host(&self) -> Option<SingleHostData> {
+        if self.id == AvId::SingleHost {
+            parse_single_host_data(self.value.as_ref()).to_result().ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn to_timestamp(&self) -> Option<FileTime> {
+        if self.id == AvId::Timestamp && self.value.len() >= mem::size_of::<FileTime>() {
+            let mut cur = Cursor::new(self.value.as_ref());
+
+            Some(FileTime {
+                lo: cur.get_u32::<LittleEndian>(),
+                hi: cur.get_u32::<LittleEndian>(),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl<'a> WriteTo for AvPair<'a> {
@@ -68,15 +138,10 @@ impl<'a> WriteTo for AvPair<'a> {
     }
 }
 
-#[macro_export]
-macro_rules! utf16 {
-    ($s:expr) => {
-        ::encoding::Encoding::encode(
-            &::encoding::codec::utf_16::UTF_16LE_ENCODING,
-            $s,
-            ::encoding::EncoderTrap::Ignore
-        ).unwrap().into()
-    };
+fn utf16<S: AsRef<str>>(s: S) -> Vec<u8> {
+    UTF_16LE_ENCODING
+        .encode(s.as_ref(), EncoderTrap::Ignore)
+        .unwrap()
 }
 
 pub fn eol<'a>() -> AvPair<'a> {
@@ -86,45 +151,72 @@ pub fn eol<'a>() -> AvPair<'a> {
     }
 }
 
-pub fn nb_computer_name(computer_name: &str) -> AvPair {
+pub fn nb_computer_name<'a>(computer_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::NbComputerName,
-        value: utf16!(computer_name),
+        value: utf16(computer_name).into(),
     }
 }
 
-pub fn nb_domain_name(domain_name: &str) -> AvPair {
+pub fn nb_domain_name<'a>(domain_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::NbDomainName,
-        value: utf16!(domain_name),
+        value: utf16(domain_name).into(),
     }
 }
 
-pub fn dns_computer_name(computer_name: &str) -> AvPair {
+pub fn dns_computer_name<'a>(computer_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::DnsComputerName,
-        value: utf16!(computer_name),
+        value: utf16(computer_name).into(),
     }
 }
 
-pub fn dns_domain_name(domain_name: &str) -> AvPair {
+pub fn dns_domain_name<'a>(domain_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::DnsDomainName,
-        value: utf16!(domain_name),
+        value: utf16(domain_name).into(),
     }
 }
 
-pub fn dns_tree_name(tree_name: &str) -> AvPair {
+pub fn dns_tree_name<'a>(tree_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::DnsTreeName,
-        value: utf16!(tree_name),
+        value: utf16(tree_name).into(),
     }
 }
 
-pub fn target_name(target_name: &str) -> AvPair {
+pub fn target_name<'a>(target_name: &str) -> AvPair<'a> {
     AvPair {
         id: AvId::TargetName,
-        value: utf16!(target_name),
+        value: utf16(target_name).into(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileTime {
+    pub lo: u32,
+    pub hi: u32,
+}
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+const INTERVALS_PER_SEC: u64 = NANOS_PER_SEC / 100;
+const INTERVALS_TO_UNIX_EPOCH: u64 = 11_644_473_600 * INTERVALS_PER_SEC;
+
+impl From<FileTime> for u64 {
+    fn from(filetime: FileTime) -> Self {
+        (u64::from(filetime.hi) << 32) + u64::from(filetime.lo)
+    }
+}
+
+impl From<FileTime> for Timespec {
+    fn from(filetime: FileTime) -> Self {
+        let ts = u64::from(filetime);
+
+        let nsecs = ((ts % INTERVALS_PER_SEC) * 100) as i32;
+        let secs = ((ts / INTERVALS_PER_SEC) as i64) - ((INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC) as i64);
+
+        Timespec::new(secs, nsecs)
     }
 }
 
@@ -190,6 +282,12 @@ bitflags! {
     }
 }
 
+impl Default for NegotiateFlags {
+    fn default() -> NegotiateFlags {
+        NegotiateFlags::empty()
+    }
+}
+
 /// There are 3 types of messages in NTLM.
 ///
 /// The message type is a field in every NTLM message header.
@@ -200,6 +298,23 @@ pub enum MessageType {
     Negotiate = 0x01,
     Challenge = 0x02,
     Authenticate = 0x03,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NtlmMessage<'a> {
+    Negotiate(NegotiateMessage<'a>),
+    Challenge(ChallengeMessage<'a>),
+    Authenticate(AuthenticateMessage<'a>),
+}
+
+impl<'a> WriteTo for NtlmMessage<'a> {
+    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+        match *self {
+            NtlmMessage::Negotiate(ref message) => message.write_to(buf),
+            NtlmMessage::Challenge(ref message) => message.write_to(buf),
+            NtlmMessage::Authenticate(ref message) => message.write_to(buf),
+        }
+    }
 }
 
 /// The `Version` structure contains operating system version information that should be ignored.
@@ -235,7 +350,7 @@ pub const NTLMSSP_REVISION_W2K3: u8 = 0x0f;
 /// The `NegotiateMessage` defines an NTLM Negotiate message that is sent from the client to the server.
 ///
 /// This message allows the client to specify its supported NTLM options to the server.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NegotiateMessage<'a> {
     /// The client sets flags to indicate options it supports.
     pub flags: NegotiateFlags,
@@ -248,6 +363,27 @@ pub struct NegotiateMessage<'a> {
 }
 
 impl<'a> NegotiateMessage<'a> {
+    pub fn with_domain_name(domain_name: &'a str) -> NegotiateMessage<'a> {
+        NegotiateMessage {
+            flags: NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
+                | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO,
+            domain_name: Some(domain_name.as_bytes().into()),
+            workstation_name: None,
+            version: None,
+        }
+    }
+
+    pub fn into_owned<'b>(self) -> NegotiateMessage<'b> {
+        NegotiateMessage {
+            flags: self.flags,
+            domain_name: self.domain_name.map(|s| Cow::from(s.into_owned())),
+            workstation_name: self.workstation_name.map(|s| Cow::from(s.into_owned())),
+            version: self.version,
+        }
+    }
+
     pub fn parse(payload: &'a [u8]) -> Result<NegotiateMessage<'a>, Error> {
         match parse_negotiate_message(payload) {
             nom::IResult::Done(remaining, (mut msg, domain_name_field, workstation_name_field)) => {
@@ -446,6 +582,60 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
 
         Ok(offset)
     }
+}
+
+fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
+    let key = pass.as_ref()
+        .to_uppercase()
+        .into_bytes()
+        .into_iter()
+        .chain(iter::repeat(0))
+        .take(14)
+        .collect::<Vec<u8>>();
+
+    let mut buf = vec![];
+
+    buf.extend_from_slice(b"KGS!@#$%");
+    buf.extend_from_slice(b"KGS!@#$%");
+
+    {
+        let (key1, key2) = key.split_at(7);
+        let (buf1, buf2) = buf.as_mut_slice().split_at_mut(8);
+
+        Des::new(&GenericArray::from(make_smb_key(key1))).encrypt_block(GenericArray::from_mut_slice(buf1));
+        Des::new(&GenericArray::from(make_smb_key(key2))).encrypt_block(GenericArray::from_mut_slice(buf2));
+    }
+
+    buf
+}
+
+fn lm_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
+    nt_owf_v2(user, pass, domain)
+}
+
+fn make_smb_key(key7: &[u8]) -> [u8; 8] {
+    [
+        ((key7[0] >> 1) & 0xff) << 1,
+        ((((key7[0] & 0x01) << 6) | (((key7[1] & 0xff) >> 2) & 0xff)) & 0xff) << 1,
+        ((((key7[1] & 0x03) << 5) | (((key7[2] & 0xff) >> 3) & 0xff)) & 0xff) << 1,
+        ((((key7[2] & 0x07) << 4) | (((key7[3] & 0xff) >> 4) & 0xff)) & 0xff) << 1,
+        ((((key7[3] & 0x0F) << 3) | (((key7[4] & 0xff) >> 5) & 0xff)) & 0xff) << 1,
+        ((((key7[4] & 0x1F) << 2) | (((key7[5] & 0xff) >> 6) & 0xff)) & 0xff) << 1,
+        ((((key7[5] & 0x3F) << 1) | (((key7[6] & 0xff) >> 7) & 0xff)) & 0xff) << 1,
+        (key7[6] & 0x7F) << 1,
+    ]
+}
+
+fn nt_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
+    Md4::digest(utf16(pass).as_slice()).to_vec()
+}
+
+fn nt_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
+    let key = Md4::digest(utf16(pass).as_slice()).to_vec();
+    let data = utf16(user.as_ref().to_uppercase() + domain.as_ref());
+    let mut hmac = Hmac::new(Md5::new(), &key);
+    hmac.input(&data);
+    hmac.result().code().to_owned()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -764,6 +954,18 @@ named!(parse_av_pairs<Vec<AvPair>>, many1!(parse_av_pair));
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(
+    parse_single_host_data<SingleHostData>,
+    do_parse!(
+        _size: call!(nom::le_u32) >>
+        _reserved: take!(4) >>
+        custom_data: call!(nom::le_u64) >>
+        machine_id: map!(take!(32), Cow::from) >>
+        (SingleHostData { custom_data, machine_id })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(
     parse_negotiate_message<(NegotiateMessage, Field, Field)>,
     do_parse!(
         _signature:
@@ -963,7 +1165,7 @@ impl Field {
     }
 }
 
-trait WriteTo {
+pub trait WriteTo {
     fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error>;
 }
 
@@ -1050,6 +1252,40 @@ named!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ntlm_v1_authentication() {
+        assert_eq!(
+            nt_owf_v1("User", "Password", "Domain"),
+            vec![
+                0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
+            ]
+        );
+
+        assert_eq!(
+            lm_owf_v1("User", "Password", "Domain"),
+            vec![
+                0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
+            ]
+        );
+    }
+
+    #[test]
+    fn ntlm_v2_authentication() {
+        assert_eq!(
+            nt_owf_v2("User", "Password", "Domain"),
+            vec![
+                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
+            ]
+        );
+
+        assert_eq!(
+            lm_owf_v2("User", "Password", "Domain"),
+            vec![
+                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
+            ]
+        );
+    }
 
     #[test]
     fn negotiate_message() {
@@ -1171,7 +1407,7 @@ mod tests {
                 | NegotiateFlags::NTLMSSP_TARGET_TYPE_DOMAIN
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO,
             server_challenge: 0x0807060504030201,
-            target_name: Some(utf16!("DOMAIN")),
+            target_name: Some(utf16("DOMAIN").into()),
             target_info: Some(vec![
                 nb_domain_name("DOMAIN"),
                 nb_computer_name("SERVER"),
@@ -1253,9 +1489,9 @@ mod tests {
                     0x99, 0x58, 0xfb, 0x8c, 0x21, 0x3a, 0x9c, 0xc6,
                 ]),
             },
-            domain_name: utf16!("DOMAIN"),
-            user_name: utf16!("user"),
-            workstation_name: utf16!("WORKSTATION"),
+            domain_name: utf16("DOMAIN").into(),
+            user_name: utf16("user").into(),
+            workstation_name: utf16("WORKSTATION").into(),
             encrypted_random_session_key: None,
             version: None,
             mic: None,

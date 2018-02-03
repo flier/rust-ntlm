@@ -12,6 +12,12 @@ pub enum NtlmError {
     #[fail(display = "message type mismatched")] MismatchedMsgType,
 
     #[fail(display = "message offset overflow")] OffsetOverflow,
+
+    #[fail(display = "unexpected message")] UnexpectedMessage,
+
+    #[fail(display = "unsupported function")] UnsupportedFunction,
+
+    #[fail(display = "logon failure")] LogonFailure,
 }
 
 impl<I> From<nom::IError<I>> for NtlmError {

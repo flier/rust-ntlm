@@ -3,16 +3,28 @@ name = "ntlm"
 version = "0.1.0"
 authors = ["Flier Lu <flier.lu@gmail.com>"]
 
+[features]
+default = ["hyper"]
+
 [dependencies]
 failure = "0.1"
 byteorder = "1.2"
 bytes = "0.4"
 bitflags = "1.0"
+generic-array = "0.9"
 encoding = "0.2"
 log = "0.4"
 num = "0.1"
 num-derive= "0.1"
+digest = "0.7"
+md4 = "0.7"
+des = "0.1"
+rust-crypto = "0.2"
+base64 = "0.9"
+rand = "0.4"
+time = "0.1"
 
+hyper = { version = "0.11", optional = true }
 clippy = { version = "*", optional = true }
 
 [dependencies.nom]
@@ -21,3 +33,7 @@ features = ["verbose-errors"]
 
 [dev-dependencies]
 pretty_env_logger = "0.2"
+futures = "0.1"
+hyper = "0.11"
+tokio-core = "0.1"
+getopts = "0.2"
