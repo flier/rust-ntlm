@@ -11,7 +11,7 @@ use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
 
 use failure::Error;
-use itertools::{self, Itertools};
+use itertools;
 use nom;
 use num::FromPrimitive;
 use time::Timespec;
@@ -22,7 +22,7 @@ use crypto::md5::Md5;
 use des::{BlockCipher, Des};
 use generic_array::GenericArray;
 use generic_array::typenum::{U16, U24, U7, U8};
-use md4::{Digest, Md4};
+use md4::{Digest as MD4Digest, Md4};
 
 use errors::NtlmError;
 use errors::ParseError::{MismatchedMsgType, MismatchedSignature};
@@ -586,7 +586,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
     }
 }
 
-fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
+pub fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: Option<S>) -> GenericArray<u8, U16> {
     let key = pass.as_ref()
         .to_uppercase()
         .into_bytes()
@@ -604,10 +604,10 @@ fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
         Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
     }
 
-    buf
+    GenericArray::from_iter(buf.into_iter())
 }
 
-fn lm_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
+pub fn lm_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: Option<S>) -> GenericArray<u8, U16> {
     nt_owf_v2(user, pass, domain)
 }
 
@@ -624,21 +624,23 @@ fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     ])
 }
 
-fn nt_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
-    Md4::digest(utf16(pass).as_slice()).to_vec()
+pub fn nt_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: Option<S>) -> GenericArray<u8, U16> {
+    GenericArray::from_iter(Md4::digest(utf16(pass).as_slice()))
 }
 
-fn nt_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
+pub fn nt_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: Option<S>) -> GenericArray<u8, U16> {
     let key = Md4::digest(utf16(pass).as_slice()).to_vec();
-    let data = utf16(user.as_ref().to_uppercase() + domain.as_ref());
     let mut hmac = Hmac::new(Md5::new(), &key);
-    hmac.input(&data);
-    hmac.result().code().to_owned()
+    hmac.input(utf16(user.as_ref().to_uppercase()).as_slice());
+    if let Some(domain) = domain {
+        hmac.input(utf16(domain.as_ref()).as_slice());
+    }
+    GenericArray::from_iter(hmac.result().code().iter().cloned())
 }
 
 /// Indicates the encryption of an 8-byte data item D with the 16-byte key K
 /// using the Data Encryption Standard Long (DESL) algorithm.
-fn desl(key: GenericArray<u8, U16>, data: GenericArray<u8, U8>) -> GenericArray<u8, U24> {
+pub fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
     let key = key.into_iter()
         .chain(iter::repeat(0))
         .take(21)
@@ -1274,34 +1276,34 @@ mod tests {
     #[test]
     fn ntlm_v1_authentication() {
         assert_eq!(
-            nt_owf_v1("User", "Password", "Domain"),
-            vec![
+            nt_owf_v1("User", "Password", Some("Domain")).as_slice(),
+            &[
                 0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
-            ]
+            ][..]
         );
 
         assert_eq!(
-            lm_owf_v1("User", "Password", "Domain"),
-            vec![
+            lm_owf_v1("User", "Password", Some("Domain")).as_slice(),
+            &[
                 0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
-            ]
+            ][..]
         );
     }
 
     #[test]
     fn ntlm_v2_authentication() {
         assert_eq!(
-            nt_owf_v2("User", "Password", "Domain"),
-            vec![
+            nt_owf_v2("User", "Password", Some("Domain")).as_slice(),
+            &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
-            ]
+            ][..]
         );
 
         assert_eq!(
-            lm_owf_v2("User", "Password", "Domain"),
-            vec![
+            lm_owf_v2("User", "Password", Some("Domain")).as_slice(),
+            &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
-            ]
+            ][..]
         );
     }
 

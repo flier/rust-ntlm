@@ -1,11 +1,21 @@
+use std::iter::{self, FromIterator};
+
+use crypto::digest::Digest;
+use crypto::md5::Md5;
 use failure::Error;
+use generic_array::GenericArray;
+use generic_array::typenum::U8;
+use rand::{thread_rng, Rng};
 use time::get_time;
 
 use errors::NtlmError;
-use proto::{AuthenticateMessage, AvId, ChallengeMessage, NegotiateFlags, NegotiateMessage, Version};
+use proto::{desl, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags, NegotiateMessage,
+            NtChallengeResponse, Version, lm_owf_v1, nt_owf_v1};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NtlmClient {
+    pub username: String,
+    pub password: String,
     /// A domain name or a NetBIOS name that identifies a domain.
     pub domain_name: Option<String>,
     /// The name of the client machine.
@@ -75,6 +85,75 @@ impl NtlmClient {
             .and_then(|av_pair| av_pair.to_timestamp())
             .map_or_else(|| get_time(), |ts| ts.into());
 
+        let client_challenge = thread_rng().gen_iter().take(8).collect::<Vec<u8>>();
+        let (nt_challenge_response, lm_challenge_response) = self.generate_response(
+            self.username.as_str(),
+            self.password.as_str(),
+            self.domain_name.as_ref().map(|s| s.as_str()),
+            challenge_message.flags,
+            GenericArray::from_slice(challenge_message.server_challenge.as_ref()),
+            GenericArray::from_slice(client_challenge.as_slice()),
+        )?;
+
         unreachable!()
+    }
+
+    fn generate_response(
+        &self,
+        user: &str,
+        pass: &str,
+        domain: Option<&str>,
+        challenge_flags: NegotiateFlags,
+        server_challenge: &GenericArray<u8, U8>,
+        client_challenge: &GenericArray<u8, U8>,
+    ) -> Result<(Option<NtChallengeResponse>, Option<LmChallengeResponse>), Error> {
+        let nt_response_key = nt_owf_v1(user, pass, domain);
+        let lm_response_key = lm_owf_v1(user, pass, domain);
+
+        if user.is_empty() && pass.is_empty() {
+            Ok((None, None))
+        } else {
+            let nt_challenge_response;
+            let lm_challenge_response;
+
+            if challenge_flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY) {
+                let mut md5 = Md5::new();
+
+                md5.input(server_challenge.as_slice());
+                md5.input(client_challenge.as_slice());
+
+                let mut hash = vec![0; md5.output_bytes()];
+
+                md5.result(&mut hash);
+
+                nt_challenge_response = desl(nt_response_key, GenericArray::from_slice(&hash[..8]));
+                lm_challenge_response = GenericArray::from_iter(
+                    client_challenge
+                        .as_slice()
+                        .iter()
+                        .cloned()
+                        .chain(iter::repeat(0u8))
+                        .take(24),
+                );
+            } else {
+                let server_challenge = GenericArray::from_slice(server_challenge.as_ref());
+
+                nt_challenge_response = desl(nt_response_key, server_challenge);
+                lm_challenge_response = if self.no_lm_response_ntlm_v1 {
+                    nt_challenge_response
+                } else {
+                    desl(lm_response_key, server_challenge)
+                };
+            }
+
+            Ok((
+                Some(NtChallengeResponse::V1 {
+                    response: nt_challenge_response.as_slice().to_vec().into(),
+                }),
+                Some(LmChallengeResponse::V1 {
+                    response: lm_challenge_response.as_slice().to_vec().into(),
+                }),
+            ))
+        }
     }
 }
