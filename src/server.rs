@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use encoding::{EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
 use failure::Error;
@@ -118,7 +120,7 @@ impl NtlmServer {
 
         Ok(ChallengeMessage {
             flags,
-            server_challenge: thread_rng().gen(),
+            server_challenge: Cow::from(thread_rng().gen_iter().take(8).collect::<Vec<u8>>()),
             target_name,
             target_info: if target_info.is_empty() {
                 None

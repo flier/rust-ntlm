@@ -14,6 +14,7 @@ extern crate encoding;
 extern crate failure;
 #[macro_use]
 extern crate generic_array;
+extern crate itertools;
 #[macro_use]
 extern crate log;
 extern crate md4;

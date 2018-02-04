@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::io::Cursor;
-use std::iter;
+use std::iter::{self, FromIterator};
 use std::mem;
 
 use byteorder::{ByteOrder, LittleEndian};
@@ -11,7 +11,7 @@ use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
 
 use failure::Error;
-use generic_array::GenericArray;
+use itertools::{self, Itertools};
 use nom;
 use num::FromPrimitive;
 use time::Timespec;
@@ -20,6 +20,8 @@ use crypto::hmac::Hmac;
 use crypto::mac::Mac;
 use crypto::md5::Md5;
 use des::{BlockCipher, Des};
+use generic_array::GenericArray;
+use generic_array::typenum::{U16, U24, U7, U8};
 use md4::{Digest, Md4};
 
 use errors::NtlmError;
@@ -471,7 +473,7 @@ pub struct ChallengeMessage<'a> {
     /// the choices it has made from the options offered by the client.
     pub flags: NegotiateFlags,
     /// A 64-bit value that contains the NTLM challenge.
-    pub server_challenge: u64,
+    pub server_challenge: Cow<'a, [u8]>,
     /// A field containing TargetName information.
     pub target_name: Option<Cow<'a, [u8]>>,
     /// A field containing TargetInfo information.
@@ -546,7 +548,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
 
         buf.put_u32::<LittleEndian>(flags.bits());
 
-        buf.put_u64::<LittleEndian>(self.server_challenge);
+        buf.put_slice(self.server_challenge.as_ref());
         buf.put_u64::<LittleEndian>(0); // Reserved
 
         if let Some(ref target_info) = self.target_info {
@@ -598,12 +600,8 @@ fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
     buf.extend_from_slice(b"KGS!@#$%");
     buf.extend_from_slice(b"KGS!@#$%");
 
-    {
-        let (key1, key2) = key.split_at(7);
-        let (buf1, buf2) = buf.as_mut_slice().split_at_mut(8);
-
-        Des::new(&GenericArray::from(make_smb_key(key1))).encrypt_block(GenericArray::from_mut_slice(buf1));
-        Des::new(&GenericArray::from(make_smb_key(key2))).encrypt_block(GenericArray::from_mut_slice(buf2));
+    for (key, buf) in key.chunks(7).zip(buf.chunks_mut(8)) {
+        Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
     }
 
     buf
@@ -613,8 +611,8 @@ fn lm_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
     nt_owf_v2(user, pass, domain)
 }
 
-fn make_smb_key(key7: &[u8]) -> [u8; 8] {
-    [
+fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
+    GenericArray::from([
         ((key7[0] >> 1) & 0xff) << 1,
         ((((key7[0] & 0x01) << 6) | (((key7[1] & 0xff) >> 2) & 0xff)) & 0xff) << 1,
         ((((key7[1] & 0x03) << 5) | (((key7[2] & 0xff) >> 3) & 0xff)) & 0xff) << 1,
@@ -623,7 +621,7 @@ fn make_smb_key(key7: &[u8]) -> [u8; 8] {
         ((((key7[4] & 0x1F) << 2) | (((key7[5] & 0xff) >> 6) & 0xff)) & 0xff) << 1,
         ((((key7[5] & 0x3F) << 1) | (((key7[6] & 0xff) >> 7) & 0xff)) & 0xff) << 1,
         (key7[6] & 0x7F) << 1,
-    ]
+    ])
 }
 
 fn nt_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: S) -> Vec<u8> {
@@ -636,6 +634,26 @@ fn nt_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: S) -> Vec<u8> {
     let mut hmac = Hmac::new(Md5::new(), &key);
     hmac.input(&data);
     hmac.result().code().to_owned()
+}
+
+/// Indicates the encryption of an 8-byte data item D with the 16-byte key K
+/// using the Data Encryption Standard Long (DESL) algorithm.
+fn desl(key: GenericArray<u8, U16>, data: GenericArray<u8, U8>) -> GenericArray<u8, U24> {
+    let key = key.into_iter()
+        .chain(iter::repeat(0))
+        .take(21)
+        .collect::<Vec<u8>>();
+
+    let mut buf = itertools::repeat_n(data.as_slice(), 3)
+        .flat_map(|data| data.iter())
+        .cloned()
+        .collect::<Vec<u8>>();
+
+    for (key, buf) in key.chunks(7).zip(buf.chunks_mut(8)) {
+        Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
+    }
+
+    GenericArray::from_iter(data.into_iter())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1019,7 +1037,7 @@ named!(
             ) >>
         target_name_field: call!(parse_field) >>
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
-        server_challenge: call!(nom::le_u64) >>
+        server_challenge: map!(take!(8), Cow::from) >>
         _reserved: take!(8) >>
         target_info_field: call!(parse_field) >>
         version:
@@ -1406,7 +1424,7 @@ mod tests {
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
                 | NegotiateFlags::NTLMSSP_TARGET_TYPE_DOMAIN
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO,
-            server_challenge: 0x0807060504030201,
+            server_challenge: vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08].into(),
             target_name: Some(utf16("DOMAIN").into()),
             target_info: Some(vec![
                 nb_domain_name("DOMAIN"),
