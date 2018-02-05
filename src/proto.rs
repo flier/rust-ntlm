@@ -132,8 +132,8 @@ impl<'a> AvPair<'a> {
     }
 }
 
-impl<'a> WriteTo for AvPair<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for AvPair<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_u16::<LittleEndian>(self.id as u16);
         buf.put_u16::<LittleEndian>(self.value.as_ref().len() as u16);
         buf.put_slice(self.value.as_ref());
@@ -379,12 +379,12 @@ pub enum NtlmMessage<'a> {
     Authenticate(AuthenticateMessage<'a>),
 }
 
-impl<'a> WriteTo for NtlmMessage<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for NtlmMessage<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         match *self {
-            NtlmMessage::Negotiate(ref message) => message.write_to(buf),
-            NtlmMessage::Challenge(ref message) => message.write_to(buf),
-            NtlmMessage::Authenticate(ref message) => message.write_to(buf),
+            NtlmMessage::Negotiate(ref message) => message.to_wire(buf),
+            NtlmMessage::Challenge(ref message) => message.to_wire(buf),
+            NtlmMessage::Authenticate(ref message) => message.to_wire(buf),
         }
     }
 }
@@ -404,8 +404,8 @@ pub struct Version {
     pub revision: u8,
 }
 
-impl WriteTo for Version {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl ToWire for Version {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_u8(self.major);
         buf.put_u8(self.minor);
         buf.put_u16::<LittleEndian>(self.build);
@@ -455,8 +455,12 @@ impl<'a> NegotiateMessage<'a> {
             version: self.version,
         }
     }
+}
 
-    pub fn parse(payload: &'a [u8]) -> Result<NegotiateMessage<'a>, Error> {
+impl<'a> FromWire<'a> for NegotiateMessage<'a> {
+    type Type = NegotiateMessage<'a>;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error> {
         match parse_negotiate_message(payload) {
             nom::IResult::Done(remaining, (mut msg, domain_name_field, workstation_name_field)) => {
                 let offset = payload.len() - remaining.len();
@@ -483,8 +487,8 @@ impl<'a> NegotiateMessage<'a> {
     }
 }
 
-impl<'a> WriteTo for NegotiateMessage<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for NegotiateMessage<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         let mut offset = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 2 + if self.version.is_some() {
             kVersionSize
         } else {
@@ -514,7 +518,7 @@ impl<'a> WriteTo for NegotiateMessage<'a> {
         offset += self.workstation_name.write_field(buf, offset)?;
 
         if let Some(ref version) = self.version {
-            version.write_to(buf)?;
+            version.to_wire(buf)?;
         }
 
         if let Some(ref domain_name) = self.domain_name {
@@ -562,8 +566,12 @@ impl<'a> ChallengeMessage<'a> {
             .as_ref()
             .and_then(|target_info| target_info.iter().find(|av_pair| av_pair.id == id))
     }
+}
 
-    pub fn parse(payload: &'a [u8]) -> Result<ChallengeMessage<'a>, Error> {
+impl<'a> FromWire<'a> for ChallengeMessage<'a> {
+    type Type = ChallengeMessage<'a>;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error> {
         match parse_challenge_message(payload) {
             nom::IResult::Done(remaining, (mut msg, target_name_field, target_info_field)) => {
                 let offset = payload.len() - remaining.len();
@@ -594,8 +602,8 @@ impl<'a> ChallengeMessage<'a> {
     }
 }
 
-impl<'a> WriteTo for ChallengeMessage<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for ChallengeMessage<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         let mut offset = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 2 + kChallengeSize
             + kReservedSize + if self.version.is_some() {
             kVersionSize
@@ -649,7 +657,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
         }
 
         if let Some(ref version) = self.version {
-            version.write_to(buf)?;
+            version.to_wire(buf)?;
         }
 
         if let Some(ref target_name) = self.target_name {
@@ -658,7 +666,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
 
         if let Some(ref target_info) = self.target_info {
             for av_pair in target_info {
-                av_pair.write_to(buf)?;
+                av_pair.to_wire(buf)?;
             }
         }
 
@@ -824,8 +832,8 @@ impl<'a> WriteField for LmChallengeResponse<'a> {
     }
 }
 
-impl<'a> WriteTo for LmChallengeResponse<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for LmChallengeResponse<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         match *self {
             LmChallengeResponse::V1 { ref response } => {
                 buf.put_slice(response);
@@ -915,7 +923,7 @@ impl<'a> NtChallengeResponse<'a> {
                 context: vec![],
             };
 
-            client_challenge.write_to(&mut client_data).unwrap();
+            client_challenge.to_wire(&mut client_data).unwrap();
 
             let mut hmac = Hmac::new(Md5::new(), nt_response_key.as_slice());
             hmac.input(server_challenge.as_slice());
@@ -954,8 +962,8 @@ impl<'a> WriteField for NtChallengeResponse<'a> {
     }
 }
 
-impl<'a> WriteTo for NtChallengeResponse<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for NtChallengeResponse<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         match *self {
             NtChallengeResponse::V1 { ref response } => {
                 buf.put_slice(response);
@@ -968,7 +976,7 @@ impl<'a> WriteTo for NtChallengeResponse<'a> {
             } => {
                 buf.put_slice(response);
 
-                let challenge_size = challenge.write_to(buf)?;
+                let challenge_size = challenge.to_wire(buf)?;
 
                 Ok(response.len() + challenge_size)
             }
@@ -993,8 +1001,8 @@ impl<'a> NtlmClientChalenge<'a> {
     }
 }
 
-impl<'a> WriteTo for NtlmClientChalenge<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for NtlmClientChalenge<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_u8(0x01); // RespType
         buf.put_u8(0x01); // HiRespType
         buf.put_u16::<LittleEndian>(0); // Reserved1
@@ -1004,7 +1012,7 @@ impl<'a> WriteTo for NtlmClientChalenge<'a> {
         buf.put_u32::<LittleEndian>(0); // Reserved3
 
         for av_pair in &self.context {
-            av_pair.write_to(buf)?;
+            av_pair.to_wire(buf)?;
         }
 
         Ok(self.size())
@@ -1038,8 +1046,10 @@ pub struct AuthenticateMessage<'a> {
     pub mic: Option<Cow<'a, [u8]>>,
 }
 
-impl<'a> AuthenticateMessage<'a> {
-    pub fn parse(payload: &'a [u8]) -> Result<AuthenticateMessage<'a>, Error> {
+impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
+    type Type = AuthenticateMessage<'a>;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error> {
         match parse_authenticate_message(payload) {
             nom::IResult::Done(
                 remaining,
@@ -1104,8 +1114,8 @@ impl<'a> AuthenticateMessage<'a> {
     }
 }
 
-impl<'a> WriteTo for AuthenticateMessage<'a> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for AuthenticateMessage<'a> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         let header_size = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 6
             + if self.version.is_some() {
                 kVersionSize
@@ -1149,21 +1159,21 @@ impl<'a> WriteTo for AuthenticateMessage<'a> {
         buf.put_u32::<LittleEndian>(flags.bits());
 
         if let Some(ref version) = self.version {
-            version.write_to(buf)?;
+            version.to_wire(buf)?;
         }
 
         if let Some(ref mic) = self.mic {
             buf.put_slice(mic);
         }
 
-        self.domain_name.write_to(buf)?;
-        self.user_name.write_to(buf)?;
-        self.workstation_name.write_to(buf)?;
+        self.domain_name.to_wire(buf)?;
+        self.user_name.to_wire(buf)?;
+        self.workstation_name.to_wire(buf)?;
 
-        self.lm_challenge_response.write_to(buf)?;
-        self.nt_challenge_response.write_to(buf)?;
+        self.lm_challenge_response.to_wire(buf)?;
+        self.nt_challenge_response.to_wire(buf)?;
 
-        self.session_key.write_to(buf)?;
+        self.session_key.to_wire(buf)?;
 
         Ok(response_offset)
     }
@@ -1408,22 +1418,28 @@ impl Field {
     }
 }
 
-pub trait WriteTo {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error>;
+pub trait FromWire<'a> {
+    type Type;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error>;
 }
 
-impl<T: WriteTo> WriteTo for Option<T> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+pub trait ToWire {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error>;
+}
+
+impl<T: ToWire> ToWire for Option<T> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         if let Some(ref data) = *self {
-            data.write_to(buf)
+            data.to_wire(buf)
         } else {
             Ok(0)
         }
     }
 }
 
-impl<'a> WriteTo for Cow<'a, [u8]> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+impl<'a> ToWire for Cow<'a, [u8]> {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_slice(self.as_ref());
 
         Ok(self.as_ref().len())
@@ -1573,11 +1589,11 @@ mod tests {
             }),
         };
 
-        assert_eq!(NegotiateMessage::parse(packet).unwrap(), message);
+        assert_eq!(NegotiateMessage::from_wire(packet).unwrap(), message);
 
         let mut buf: Vec<u8> = vec![];
 
-        assert_eq!(message.write_to(&mut buf).unwrap(), packet.len());
+        assert_eq!(message.to_wire(&mut buf).unwrap(), packet.len());
         assert_eq!(buf.as_slice(), packet);
     }
 
@@ -1659,11 +1675,11 @@ mod tests {
             version: None,
         };
 
-        assert_eq!(ChallengeMessage::parse(packet).unwrap(), message);
+        assert_eq!(ChallengeMessage::from_wire(packet).unwrap(), message);
 
         let mut buf: Vec<u8> = vec![];
 
-        assert_eq!(message.write_to(&mut buf).unwrap(), packet.len());
+        assert_eq!(message.to_wire(&mut buf).unwrap(), packet.len());
         assert_eq!(buf.as_slice(), packet);
     }
 
@@ -1739,11 +1755,11 @@ mod tests {
             mic: None,
         };
 
-        assert_eq!(AuthenticateMessage::parse(packet).unwrap(), message);
+        assert_eq!(AuthenticateMessage::from_wire(packet).unwrap(), message);
 
         let mut buf: Vec<u8> = vec![];
 
-        assert_eq!(message.write_to(&mut buf).unwrap(), packet.len());
+        assert_eq!(message.to_wire(&mut buf).unwrap(), packet.len());
         assert_eq!(buf.as_slice(), packet);
     }
 }

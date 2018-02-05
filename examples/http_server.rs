@@ -21,7 +21,7 @@ use hyper::server::{Http, Request, Response, Service};
 use getopts::Options;
 
 use ntlm::http::{WWWAuthenticate, NTLM};
-use ntlm::proto::WriteTo;
+use ntlm::proto::ToWire;
 use ntlm::server::NtlmServer;
 
 struct HelloWorld {
@@ -50,7 +50,7 @@ impl Service for HelloWorld {
                 Ok(Some(message)) => {
                     let mut buf = vec![];
 
-                    match message.write_to(&mut buf) {
+                    match message.to_wire(&mut buf) {
                         Ok(_) => Box::new(futures::future::ok(
                             Response::new()
                                 .with_status(StatusCode::Unauthorized)

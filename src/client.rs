@@ -1,4 +1,4 @@
-use encoding::EncodingRef;
+
 use failure::Error;
 use generic_array::GenericArray;
 use time::get_time;

@@ -6,7 +6,7 @@ use hyper::header::Scheme;
 
 use base64;
 
-use proto::{NegotiateMessage, NtlmMessage, WriteTo};
+use proto::{NegotiateMessage, NtlmMessage, ToWire, FromWire};
 
 header! { (WWWAuthenticate, "WWW-Authenticate") => (String)* }
 
@@ -26,7 +26,7 @@ impl<'a> Scheme for NTLM<'a> {
     fn fmt_scheme(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut buf = vec![];
 
-        self.message.write_to(&mut buf).map_err(|err| {
+        self.message.to_wire(&mut buf).map_err(|err| {
             warn!("fail to write NTLM message, {}", err);
 
             fmt::Error
@@ -46,7 +46,7 @@ impl<'a> FromStr for NTLM<'a> {
             Error::Header
         })?;
 
-        let negotiate_message = NegotiateMessage::parse(&data).map_err(|err| {
+        let negotiate_message = NegotiateMessage::from_wire(&data).map_err(|err| {
             debug!("fail to parse negotiate message, {}", err);
 
             Error::Header
