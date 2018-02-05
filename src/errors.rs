@@ -16,8 +16,6 @@ pub enum NtlmError {
     #[fail(display = "unexpected message")] UnexpectedMessage,
 
     #[fail(display = "unsupported function")] UnsupportedFunction,
-
-    #[fail(display = "logon failure")] LogonFailure,
 }
 
 impl<I> From<nom::IError<I>> for NtlmError {

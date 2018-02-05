@@ -148,19 +148,21 @@ impl NtlmClient {
             flags,
             lm_challenge_response,
             nt_challenge_response,
-            domain_name: self.domain_name.as_ref().map_or_else(
-                || Default::default(),
-                |s| if support_unicode { utf16(s) } else { oem(s) }.into(),
-            ),
+            domain_name: self.domain_name
+                .as_ref()
+                .map_or_else(Default::default, |s| {
+                    if support_unicode { utf16(s) } else { oem(s) }.into()
+                }),
             user_name: if support_unicode {
                 utf16(&self.username)
             } else {
                 oem(&self.username)
             }.into(),
-            workstation_name: self.workstation_name.as_ref().map_or_else(
-                || Default::default(),
-                |s| if support_unicode { utf16(s) } else { oem(s) }.into(),
-            ),
+            workstation_name: self.workstation_name
+                .as_ref()
+                .map_or_else(Default::default, |s| {
+                    if support_unicode { utf16(s) } else { oem(s) }.into()
+                }),
             session_key: None,
             version: None,
             mic: None,

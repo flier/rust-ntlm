@@ -10,9 +10,9 @@ use bytes::{Buf, BufMut};
 use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
 
-use nom;
 use failure::Error;
 use itertools;
+use nom;
 use num::FromPrimitive;
 use time::{get_time, Timespec};
 
@@ -464,14 +464,18 @@ impl<'a> NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
+                    msg.domain_name = Some(Cow::from(
+                        domain_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
+                    msg.workstation_name = Some(Cow::from(
+                        workstation_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 Ok(msg)
@@ -562,7 +566,9 @@ impl<'a> ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
+                    msg.target_name = Some(Cow::from(
+                        target_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 if msg.flags
@@ -623,7 +629,9 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
+                .map(|av_pair| {
+                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
+                })
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -679,13 +687,13 @@ pub fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
 
 fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     GenericArray::from([
-        ((key7[0] >> 1) & 0xff) << 1,
-        ((((key7[0] & 0x01) << 6) | (((key7[1] & 0xff) >> 2) & 0xff)) & 0xff) << 1,
-        ((((key7[1] & 0x03) << 5) | (((key7[2] & 0xff) >> 3) & 0xff)) & 0xff) << 1,
-        ((((key7[2] & 0x07) << 4) | (((key7[3] & 0xff) >> 4) & 0xff)) & 0xff) << 1,
-        ((((key7[3] & 0x0F) << 3) | (((key7[4] & 0xff) >> 5) & 0xff)) & 0xff) << 1,
-        ((((key7[4] & 0x1F) << 2) | (((key7[5] & 0xff) >> 6) & 0xff)) & 0xff) << 1,
-        ((((key7[5] & 0x3F) << 1) | (((key7[6] & 0xff) >> 7) & 0xff)) & 0xff) << 1,
+        (key7[0] >> 1) << 1,
+        (((key7[0] & 0x01) << 6) | (key7[1] >> 2)) << 1,
+        (((key7[1] & 0x03) << 5) | (key7[2] >> 3)) << 1,
+        (((key7[2] & 0x07) << 4) | (key7[3] >> 4)) << 1,
+        (((key7[3] & 0x0F) << 3) | (key7[4] >> 5)) << 1,
+        (((key7[4] & 0x1F) << 2) | (key7[5] >> 6)) << 1,
+        (((key7[5] & 0x3F) << 1) | (key7[6] >> 7)) << 1,
         (key7[6] & 0x7F) << 1,
     ])
 }
@@ -1077,7 +1085,9 @@ impl<'a> AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && session_key_field.length > 0
                 {
-                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
+                    msg.session_key = Some(Cow::from(
+                        session_key_field.extract_data(remaining, offset)?,
+                    ))
                 }
 
                 Ok(msg)
@@ -1481,14 +1491,44 @@ mod tests {
         assert_eq!(
             nt_owf_v1(password).as_slice(),
             &[
-                0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
+                0xa4,
+                0xf4,
+                0x9c,
+                0x40,
+                0x65,
+                0x10,
+                0xbd,
+                0xca,
+                0xb6,
+                0x82,
+                0x4e,
+                0xe7,
+                0xc3,
+                0x0f,
+                0xd8,
+                0x52
             ][..]
         );
 
         assert_eq!(
             lm_owf_v1(password).as_slice(),
             &[
-                0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
+                0xe5,
+                0x2c,
+                0xac,
+                0x67,
+                0x41,
+                0x9a,
+                0x9a,
+                0x22,
+                0x4a,
+                0x3b,
+                0x10,
+                0x8f,
+                0x3f,
+                0xa6,
+                0xcb,
+                0x6d
             ][..]
         );
     }
@@ -1498,14 +1538,44 @@ mod tests {
         assert_eq!(
             nt_owf_v2(username, password, domain).as_slice(),
             &[
-                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
+                0x0c,
+                0x86,
+                0x8a,
+                0x40,
+                0x3b,
+                0xfd,
+                0x7a,
+                0x93,
+                0xa3,
+                0x00,
+                0x1e,
+                0xf2,
+                0x2e,
+                0xf0,
+                0x2e,
+                0x3f
             ][..]
         );
 
         assert_eq!(
             lm_owf_v2(username, password, domain).as_slice(),
             &[
-                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
+                0x0c,
+                0x86,
+                0x8a,
+                0x40,
+                0x3b,
+                0xfd,
+                0x7a,
+                0x93,
+                0xa3,
+                0x00,
+                0x1e,
+                0xf2,
+                0x2e,
+                0xf0,
+                0x2e,
+                0x3f
             ][..]
         );
     }
