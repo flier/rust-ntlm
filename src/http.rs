@@ -6,7 +6,7 @@ use hyper::header::Scheme;
 
 use base64;
 
-use proto::{NegotiateMessage, NtlmMessage, ToWire, FromWire};
+use proto::{FromWire, NegotiateMessage, NtlmMessage, ToWire};
 
 header! { (WWWAuthenticate, "WWW-Authenticate") => (String)* }
 

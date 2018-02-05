@@ -754,6 +754,27 @@ pub fn generate_challenge() -> GenericArray<u8, U8> {
     GenericArray::from_iter(thread_rng().gen_iter().take(8))
 }
 
+pub type SessionKey = GenericArray<u8, U16>;
+
+pub fn generate_session_base_key_v1<S: AsRef<str>>(password: S) -> SessionKey {
+    let nt_response_key = nt_owf_v1(password);
+
+    GenericArray::from_iter(Md4::digest(nt_response_key.as_slice()))
+}
+
+pub fn generate_session_base_key_v2<S: AsRef<str>>(
+    username: S,
+    password: S,
+    domain: Option<S>,
+    nt_proof_str: &GenericArray<u8, U16>,
+) -> SessionKey {
+    let nt_response_key = nt_owf_v2(username, password, domain);
+
+    let mut hmac = Hmac::new(Md5::new(), nt_response_key.as_slice());
+    hmac.input(nt_proof_str.as_slice());
+    GenericArray::from_iter(hmac.result().code().iter().cloned())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum LmChallengeResponse<'a> {
     V1 {

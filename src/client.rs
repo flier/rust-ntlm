@@ -1,11 +1,11 @@
-
 use failure::Error;
 use generic_array::GenericArray;
 use time::get_time;
 
 use errors::NtlmError;
 use proto::{generate_challenge, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
-            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, Version, utf16};
+            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, Version, generate_session_base_key_v1,
+            generate_session_base_key_v2, utf16};
 
 #[derive(Clone, Debug, Default)]
 pub struct NtlmClient {
@@ -92,6 +92,12 @@ impl NtlmClient {
         let support_unicode = challenge_message
             .flags
             .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE);
+        let with_extended_session_security = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY);
+        let support_message_sign = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN);
 
         let flags = NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM | if support_unicode {
             NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE
@@ -104,13 +110,15 @@ impl NtlmClient {
             .and_then(|av_pair| av_pair.to_timestamp())
             .unwrap_or_else(|| get_time().into());
         let server_challenge = GenericArray::from_slice(challenge_message.server_challenge.as_ref());
+        let mut session_base_key = None;
 
         let (nt_challenge_response, lm_challenge_response) = match self.security_level {
-            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if challenge_message
-                .flags
-                .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
-            {
+            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if with_extended_session_security {
                 let client_challenge = generate_challenge();
+
+                if support_message_sign {
+                    session_base_key = Some(generate_session_base_key_v1(&self.password));
+                }
 
                 (
                     NtChallengeResponse::with_extended_session_security(
@@ -141,23 +149,38 @@ impl NtlmClient {
                     bail!(NtlmError::LogonFailure);
                 }
 
-                (
-                    NtChallengeResponse::v2(
-                        &self.username,
-                        &self.password,
-                        self.domain_name.as_ref().map(|s| s.as_str()),
-                        server_challenge,
-                        &generate_challenge(),
-                        curent_time,
-                    ),
-                    LmChallengeResponse::v2(
-                        &self.username,
-                        &self.password,
-                        self.domain_name.as_ref().map(|s| s.as_str()),
-                        server_challenge,
-                        &generate_challenge(),
-                    ),
-                )
+                let username = &self.username;
+                let password = &self.password;
+                let domain_name = self.domain_name.as_ref().map(|s| s.as_str());
+
+                let nt_challenge_response = NtChallengeResponse::v2(
+                    username,
+                    password,
+                    domain_name,
+                    server_challenge,
+                    &generate_challenge(),
+                    curent_time,
+                );
+                let lm_challenge_response = LmChallengeResponse::v2(
+                    username,
+                    password,
+                    domain_name,
+                    server_challenge,
+                    &generate_challenge(),
+                );
+
+                if support_message_sign {
+                    let nt_proof_str = nt_challenge_response.as_ref().unwrap().response();
+
+                    session_base_key = Some(generate_session_base_key_v2(
+                        username,
+                        password,
+                        self.domain_name.as_ref(),
+                        GenericArray::from_slice(nt_proof_str.as_ref()),
+                    ));
+                }
+
+                (nt_challenge_response, lm_challenge_response)
             }
         };
 
