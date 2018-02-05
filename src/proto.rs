@@ -663,7 +663,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
     }
 }
 
-pub fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
+fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
     let key = password
         .as_ref()
         .to_uppercase()
@@ -698,15 +698,15 @@ fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     ])
 }
 
-pub fn nt_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
+fn nt_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
     GenericArray::from_iter(Md4::digest(utf16(password).as_slice()))
 }
 
-pub fn lm_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+fn lm_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
     nt_owf_v2(username, password, domain)
 }
 
-pub fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
     let key = nt_owf_v1(password);
     let mut hmac = Hmac::new(Md5::new(), key.as_slice());
     hmac.input(utf16(username.as_ref().to_uppercase()).as_slice());
@@ -718,7 +718,7 @@ pub fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> 
 
 /// Indicates the encryption of an 8-byte data item D with the 16-byte key K
 /// using the Data Encryption Standard Long (DESL) algorithm.
-pub fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
+fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
     let key = key.into_iter()
         .chain(iter::repeat(0))
         .take(21)
