@@ -1,16 +1,13 @@
-use std::iter::{self, FromIterator};
+use std::iter::FromIterator;
 
-use crypto::digest::Digest;
-use crypto::md5::Md5;
 use failure::Error;
 use generic_array::GenericArray;
-use generic_array::typenum::U8;
 use rand::{thread_rng, Rng};
 use time::get_time;
 
 use errors::NtlmError;
-use proto::{desl, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags, NegotiateMessage,
-            NtChallengeResponse, Version, lm_owf_v1, nt_owf_v1};
+use proto::{oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags, NegotiateMessage,
+            NtChallengeResponse, NtlmSecurityLevel, Version, utf16};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NtlmClient {
@@ -27,6 +24,9 @@ pub struct NtlmClient {
     pub no_lm_response_ntlm_v1: bool,
     /// A Boolean setting that requires the client to use 128-bit encryption.
     pub require_128bit_encryption: bool,
+    /// NTLM security levels determine the minimum security settings
+    /// allowed on a client, server, or DC to authenticate in an NTLM domain.
+    pub security_level: NtlmSecurityLevel,
 }
 
 impl NtlmClient {
@@ -55,8 +55,8 @@ impl NtlmClient {
 
             NegotiateMessage {
                 flags,
-                domain_name: None,
-                workstation_name: None,
+                domain_name: self.domain_name.as_ref().map(|s| oem(s).into()),
+                workstation_name: self.workstation_name.as_ref().map(|s| oem(s).into()),
                 version: self.version.clone(),
             }
         }
@@ -74,6 +74,16 @@ impl NtlmClient {
             bail!(NtlmError::UnsupportedFunction);
         }
 
+        let support_unicode = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE);
+
+        let flags = NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM | if support_unicode {
+            NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE
+        } else {
+            NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
+        };
+
         let curent_time = challenge_message
             .target_info
             .as_ref()
@@ -83,77 +93,77 @@ impl NtlmClient {
                     .find(|av_pair| av_pair.id == AvId::Timestamp)
             })
             .and_then(|av_pair| av_pair.to_timestamp())
-            .map_or_else(|| get_time(), |ts| ts.into());
+            .unwrap_or_else(|| get_time().into());
+        let server_challenge = GenericArray::from_slice(challenge_message.server_challenge.as_ref());
+        let client_challenge = GenericArray::from_iter(thread_rng().gen_iter().take(8));
 
-        let client_challenge = thread_rng().gen_iter().take(8).collect::<Vec<u8>>();
-        let (nt_challenge_response, lm_challenge_response) = self.generate_response(
-            self.username.as_str(),
-            self.password.as_str(),
-            self.domain_name.as_ref().map(|s| s.as_str()),
-            challenge_message.flags,
-            GenericArray::from_slice(challenge_message.server_challenge.as_ref()),
-            GenericArray::from_slice(client_challenge.as_slice()),
-        )?;
-
-        unreachable!()
-    }
-
-    fn generate_response(
-        &self,
-        user: &str,
-        pass: &str,
-        domain: Option<&str>,
-        challenge_flags: NegotiateFlags,
-        server_challenge: &GenericArray<u8, U8>,
-        client_challenge: &GenericArray<u8, U8>,
-    ) -> Result<(Option<NtChallengeResponse>, Option<LmChallengeResponse>), Error> {
-        let nt_response_key = nt_owf_v1(user, pass, domain);
-        let lm_response_key = lm_owf_v1(user, pass, domain);
-
-        if user.is_empty() && pass.is_empty() {
-            Ok((None, None))
-        } else {
-            let nt_challenge_response;
-            let lm_challenge_response;
-
-            if challenge_flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY) {
-                let mut md5 = Md5::new();
-
-                md5.input(server_challenge.as_slice());
-                md5.input(client_challenge.as_slice());
-
-                let mut hash = vec![0; md5.output_bytes()];
-
-                md5.result(&mut hash);
-
-                nt_challenge_response = desl(nt_response_key, GenericArray::from_slice(&hash[..8]));
-                lm_challenge_response = GenericArray::from_iter(
-                    client_challenge
-                        .as_slice()
-                        .iter()
-                        .cloned()
-                        .chain(iter::repeat(0u8))
-                        .take(24),
-                );
+        let (nt_challenge_response, lm_challenge_response) = match self.security_level {
+            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if challenge_message
+                .flags
+                .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
+            {
+                (
+                    NtChallengeResponse::v1_with_extended_session_security(
+                        &self.password,
+                        server_challenge,
+                        &client_challenge,
+                    ),
+                    LmChallengeResponse::v1_with_extended_session_security(&client_challenge),
+                )
             } else {
-                let server_challenge = GenericArray::from_slice(server_challenge.as_ref());
+                (
+                    NtChallengeResponse::v1(&self.password, server_challenge),
+                    LmChallengeResponse::v1(&self.password, server_challenge),
+                )
+            },
+            NtlmSecurityLevel::Level2 => {
+                let nt_challenge_response = NtChallengeResponse::v1(&self.password, server_challenge);
+                let response = nt_challenge_response.as_ref().unwrap().response();
 
-                nt_challenge_response = desl(nt_response_key, server_challenge);
-                lm_challenge_response = if self.no_lm_response_ntlm_v1 {
-                    nt_challenge_response
-                } else {
-                    desl(lm_response_key, server_challenge)
-                };
+                (
+                    nt_challenge_response,
+                    Some(LmChallengeResponse::V1 { response }),
+                )
             }
+            NtlmSecurityLevel::Level3 | NtlmSecurityLevel::Level4 | NtlmSecurityLevel::Level5 => (
+                NtChallengeResponse::v2(
+                    &self.username,
+                    &self.password,
+                    self.domain_name.as_ref().map(|s| s.as_str()),
+                    server_challenge,
+                    &client_challenge,
+                    curent_time,
+                ),
+                LmChallengeResponse::v2(
+                    &self.username,
+                    &self.password,
+                    self.domain_name.as_ref().map(|s| s.as_str()),
+                    server_challenge,
+                    &client_challenge,
+                ),
+            ),
+        };
 
-            Ok((
-                Some(NtChallengeResponse::V1 {
-                    response: nt_challenge_response.as_slice().to_vec().into(),
-                }),
-                Some(LmChallengeResponse::V1 {
-                    response: lm_challenge_response.as_slice().to_vec().into(),
-                }),
-            ))
-        }
+        Ok(AuthenticateMessage {
+            flags,
+            lm_challenge_response,
+            nt_challenge_response,
+            domain_name: self.domain_name.as_ref().map_or_else(
+                || Default::default(),
+                |s| if support_unicode { utf16(s) } else { oem(s) }.into(),
+            ),
+            user_name: if support_unicode {
+                utf16(&self.username)
+            } else {
+                oem(&self.username)
+            }.into(),
+            workstation_name: self.workstation_name.as_ref().map_or_else(
+                || Default::default(),
+                |s| if support_unicode { utf16(s) } else { oem(s) }.into(),
+            ),
+            session_key: None,
+            version: None,
+            mic: None,
+        })
     }
 }

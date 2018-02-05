@@ -10,12 +10,13 @@ use bytes::{Buf, BufMut};
 use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
 
+use nom;
 use failure::Error;
 use itertools;
-use nom;
 use num::FromPrimitive;
-use time::Timespec;
+use time::{get_time, Timespec};
 
+use crypto::digest::Digest;
 use crypto::hmac::Hmac;
 use crypto::mac::Mac;
 use crypto::md5::Md5;
@@ -140,7 +141,11 @@ impl<'a> WriteTo for AvPair<'a> {
     }
 }
 
-fn utf16<S: AsRef<str>>(s: S) -> Vec<u8> {
+pub fn oem<S: AsRef<str>>(s: S) -> Vec<u8> {
+    s.as_ref().as_bytes().to_vec()
+}
+
+pub fn utf16<S: AsRef<str>>(s: S) -> Vec<u8> {
     UTF_16LE_ENCODING
         .encode(s.as_ref(), EncoderTrap::Ignore)
         .unwrap()
@@ -205,6 +210,12 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const INTERVALS_PER_SEC: u64 = NANOS_PER_SEC / 100;
 const INTERVALS_TO_UNIX_EPOCH: u64 = 11_644_473_600 * INTERVALS_PER_SEC;
 
+impl FileTime {
+    pub fn now() -> Self {
+        get_time().into()
+    }
+}
+
 impl From<FileTime> for u64 {
     fn from(filetime: FileTime) -> Self {
         (u64::from(filetime.hi) << 32) + u64::from(filetime.lo)
@@ -219,6 +230,19 @@ impl From<FileTime> for Timespec {
         let secs = ((ts / INTERVALS_PER_SEC) as i64) - ((INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC) as i64);
 
         Timespec::new(secs, nsecs)
+    }
+}
+
+impl From<Timespec> for FileTime {
+    fn from(ts: Timespec) -> Self {
+        let sec = ts.sec + (INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC) as i64;
+        let nsec = ts.nsec as u64 / INTERVALS_PER_SEC;
+        let intervals = (sec as u64 * INTERVALS_PER_SEC + nsec) as u64;
+
+        FileTime {
+            lo: (intervals & ((1 << 32) - 1)) as u32,
+            hi: (intervals >> 32) as u32,
+        }
     }
 }
 
@@ -239,7 +263,7 @@ bitflags! {
         /// If set, requests Unicode character set encoding.
         const NTLMSSP_NEGOTIATE_UNICODE = 0x0000_0001;
         /// If set, requests OEM character set encoding.
-        const NTLM_NEGOTIATE_OEM = 0x0000_0002;
+        const NTLMSSP_NEGOTIATE_OEM = 0x0000_0002;
         /// If set, a TargetName field of the CHALLENGE_MESSAGE (section 2.2.1.2) MUST be supplied.
         const NTLMSSP_REQUEST_TARGET = 0x0000_0004;
         /// If set, requests session key negotiation for message signatures.
@@ -250,6 +274,8 @@ bitflags! {
         const NTLMSSP_NEGOTIATE_DATAGRAM = 0x0000_0040;
         /// If set, requests LAN Manager (LM) session key computation.
         const NTLMSSP_NEGOTIATE_LM_KEY = 0x0000_0080;
+
+        const NTLMSSP_NEGOTIATE_NETWARE = 0x0000_0100;
         /// If set, requests usage of the NTLM v1 session security protocol.
         const NTLMSSP_NEGOTIATE_NTLM = 0x0000_0200;
         /// If set, the connection SHOULD be anonymous.
@@ -258,16 +284,25 @@ bitflags! {
         const NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED = 0x0000_1000;
         /// This flag indicates whether the Workstation field is present.
         const NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED = 0x0000_2000;
+        /// Sent by the server to indicate that the server and client are on the same machine.
+        /// This implies that the server will include a local security context handle in the Type 2 message,
+        /// for use in local authentication.
+        const NTLMSSP_NEGOTIATE_LOCAL_CALL = 0x0000_4000;
         /// If set, requests the presence of a signature block on all messages.
         const NTLMSSP_NEGOTIATE_ALWAYS_SIGN = 0x0000_8000;
         /// If set, TargetName MUST be a domain name.
         const NTLMSSP_TARGET_TYPE_DOMAIN = 0x0001_0000;
         /// If set, TargetName MUST be a server name.
         const NTLMSSP_TARGET_TYPE_SERVER = 0x0002_0000;
+        /// Sent by the server in the Type 2 message to indicate
+        /// that the target authentication realm is a share (presumably for share-level authentication).
+        const NTLMSSP_TARGET_TYPE_SHARE = 0x0004_0000;
         /// If set, requests usage of the NTLM v2 session security.
         const NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY = 0x0008_0000;
         /// If set, requests an identify level token.
         const NTLMSSP_NEGOTIATE_IDENTIFY = 0x0010_0000;
+
+        const NTLMSSP_REQUEST_ACCEPT_RESPONSE = 0x0020_0000;
         /// If set, requests the usage of the LMOWF.
         const NTLMSSP_REQUEST_NON_NT_SESSION_KEY = 0x0040_0000;
         /// If set, indicates that the TargetInfo fields
@@ -287,6 +322,40 @@ bitflags! {
 impl Default for NegotiateFlags {
     fn default() -> NegotiateFlags {
         NegotiateFlags::empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd)]
+pub enum NtlmSecurityLevel {
+    /// Server sends LM and NTLM response and never uses extended session security.
+    /// Clients use LM and NTLM authentication, and never use extended session security.
+    /// DCs accept LM, NTLM, and NTLM v2 authentication.
+    Level0,
+    /// Servers use NTLM v2 session security if it is negotiated.
+    /// Clients use LM and NTLM authentication and use extended session security
+    /// if the server supports it. DCs accept LM, NTLM, and NTLM v2 authentication.
+    Level1,
+    /// Server sends NTLM response only.
+    /// Clients use only NTLM authentication and use extended session security if the server supports it.
+    /// DCs accept LM, NTLM, and NTLM v2 authentication.
+    Level2,
+    /// Server sends NTLM v2 response only.
+    /// Clients use NTLM v2 authentication and use extended session security if the server supports it.
+    /// DCs accept LM, NTLM, and NTLM v2 authentication.
+    Level3,
+    /// DCs refuse LM responses.
+    /// Clients use NTLM authentication and use extended session security if the server supports it.
+    /// DCs refuse LM authentication but accept NTLM and NTLM v2 authentication.
+    Level4,
+    /// DCs refuse LM and NTLM responses, and accept only NTLM v2.
+    /// Clients use NTLM v2 authentication and use extended session security if the server supports it.
+    /// DCs refuse NTLM and LM authentication, and accept only NTLM v2 authentication.
+    Level5,
+}
+
+impl Default for NtlmSecurityLevel {
+    fn default() -> Self {
+        NtlmSecurityLevel::Level3
     }
 }
 
@@ -586,8 +655,9 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
     }
 }
 
-pub fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: Option<S>) -> GenericArray<u8, U16> {
-    let key = pass.as_ref()
+pub fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
+    let key = password
+        .as_ref()
         .to_uppercase()
         .into_bytes()
         .into_iter()
@@ -607,10 +677,6 @@ pub fn lm_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: Option<S>) -> Generi
     GenericArray::from_iter(buf.into_iter())
 }
 
-pub fn lm_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: Option<S>) -> GenericArray<u8, U16> {
-    nt_owf_v2(user, pass, domain)
-}
-
 fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     GenericArray::from([
         ((key7[0] >> 1) & 0xff) << 1,
@@ -624,14 +690,18 @@ fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     ])
 }
 
-pub fn nt_owf_v1<S: AsRef<str>>(_user: S, pass: S, _domain: Option<S>) -> GenericArray<u8, U16> {
-    GenericArray::from_iter(Md4::digest(utf16(pass).as_slice()))
+pub fn nt_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
+    GenericArray::from_iter(Md4::digest(utf16(password).as_slice()))
 }
 
-pub fn nt_owf_v2<S: AsRef<str>>(user: S, pass: S, domain: Option<S>) -> GenericArray<u8, U16> {
-    let key = Md4::digest(utf16(pass).as_slice()).to_vec();
-    let mut hmac = Hmac::new(Md5::new(), &key);
-    hmac.input(utf16(user.as_ref().to_uppercase()).as_slice());
+pub fn lm_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+    nt_owf_v2(username, password, domain)
+}
+
+pub fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+    let key = nt_owf_v1(password);
+    let mut hmac = Hmac::new(Md5::new(), key.as_slice());
+    hmac.input(utf16(username.as_ref().to_uppercase()).as_slice());
     if let Some(domain) = domain {
         hmac.input(utf16(domain.as_ref()).as_slice());
     }
@@ -667,6 +737,57 @@ pub enum LmChallengeResponse<'a> {
         response: Cow<'a, [u8]>,
         challenge: Cow<'a, [u8]>,
     },
+}
+
+impl<'a> LmChallengeResponse<'a> {
+    pub fn v1(password: &str, server_challenge: &GenericArray<u8, U8>) -> Option<LmChallengeResponse<'a>> {
+        if password.is_empty() {
+            None
+        } else {
+            let lm_response_key = lm_owf_v1(password);
+            let lm_response_data = desl(lm_response_key, server_challenge);
+
+            Some(LmChallengeResponse::V1 {
+                response: lm_response_data.as_slice().to_vec().into(),
+            })
+        }
+    }
+
+    pub fn v1_with_extended_session_security(
+        client_challenge: &GenericArray<u8, U8>,
+    ) -> Option<LmChallengeResponse<'a>> {
+        let mut lm_response_data = vec![];
+
+        lm_response_data.extend_from_slice(client_challenge.as_slice());
+        lm_response_data.extend(iter::repeat(0).take(16));
+
+        Some(LmChallengeResponse::V1 {
+            response: lm_response_data.into(),
+        })
+    }
+
+    pub fn v2(
+        username: &str,
+        password: &str,
+        domain: Option<&str>,
+        server_challenge: &GenericArray<u8, U8>,
+        client_challenge: &GenericArray<u8, U8>,
+    ) -> Option<LmChallengeResponse<'a>> {
+        if username.is_empty() || password.is_empty() || domain.is_none() {
+            None
+        } else {
+            let lm_response_key = lm_owf_v2(username, password, domain);
+            let mut hmac = Hmac::new(Md5::new(), lm_response_key.as_slice());
+            hmac.input(server_challenge.as_slice());
+            hmac.input(client_challenge.as_slice());
+            let lm_response_data: GenericArray<u8, U16> = GenericArray::from_iter(hmac.result().code().iter().cloned());
+
+            Some(LmChallengeResponse::V2 {
+                response: lm_response_data.as_slice().to_vec().into(),
+                challenge: client_challenge.as_slice().to_vec().into(),
+            })
+        }
+    }
 }
 
 impl<'a> WriteField for LmChallengeResponse<'a> {
@@ -717,6 +838,86 @@ pub enum NtChallengeResponse<'a> {
         response: Cow<'a, [u8]>,
         challenge: NtlmClientChalenge<'a>,
     },
+}
+
+impl<'a> NtChallengeResponse<'a> {
+    pub fn v1(password: &str, server_challenge: &GenericArray<u8, U8>) -> Option<NtChallengeResponse<'a>> {
+        if password.is_empty() {
+            None
+        } else {
+            let nt_response_key = nt_owf_v1(password);
+            let nt_response_data = desl(nt_response_key, server_challenge);
+
+            Some(NtChallengeResponse::V1 {
+                response: nt_response_data.as_slice().to_vec().into(),
+            })
+        }
+    }
+
+    pub fn v1_with_extended_session_security(
+        password: &str,
+        server_challenge: &GenericArray<u8, U8>,
+        client_challenge: &GenericArray<u8, U8>,
+    ) -> Option<NtChallengeResponse<'a>> {
+        if password.is_empty() {
+            None
+        } else {
+            let nt_response_key = nt_owf_v1(password);
+
+            let mut md5 = Md5::new();
+            md5.input(server_challenge.as_slice());
+            md5.input(client_challenge.as_slice());
+
+            let mut hash = vec![];
+            md5.result(&mut hash);
+
+            let nt_response_data = desl(nt_response_key, GenericArray::from_slice(&hash[..8]));
+
+            Some(NtChallengeResponse::V1 {
+                response: nt_response_data.as_slice().to_vec().into(),
+            })
+        }
+    }
+
+    pub fn v2(
+        username: &str,
+        password: &str,
+        domain: Option<&str>,
+        server_challenge: &GenericArray<u8, U8>,
+        client_challenge: &GenericArray<u8, U8>,
+        current_time: FileTime,
+    ) -> Option<NtChallengeResponse<'a>> {
+        if username.is_empty() || password.is_empty() || domain.is_none() {
+            None
+        } else {
+            let nt_response_key = nt_owf_v2(username, password, domain);
+            let mut client_data = vec![];
+
+            let client_challenge = NtlmClientChalenge {
+                timestamp: current_time.into(),
+                challenge: client_challenge.as_slice().to_vec().into(),
+                context: vec![],
+            };
+
+            client_challenge.write_to(&mut client_data).unwrap();
+
+            let mut hmac = Hmac::new(Md5::new(), nt_response_key.as_slice());
+            hmac.input(server_challenge.as_slice());
+            hmac.input(client_data.as_slice());
+            let nt_response_data: GenericArray<u8, U16> = GenericArray::from_iter(hmac.result().code().iter().cloned());
+
+            Some(NtChallengeResponse::V2 {
+                response: nt_response_data.as_slice().to_vec().into(),
+                challenge: client_challenge,
+            })
+        }
+    }
+
+    pub fn response(&self) -> Cow<'a, [u8]> {
+        match *self {
+            NtChallengeResponse::V1 { ref response } | NtChallengeResponse::V2 { ref response, .. } => response.clone(),
+        }
+    }
 }
 
 impl<'a> WriteField for NtChallengeResponse<'a> {
@@ -804,9 +1005,9 @@ pub struct AuthenticateMessage<'a> {
     /// negotiated in the previous messages.
     pub flags: NegotiateFlags,
     /// A field containing `LmChallengeResponse` information.
-    pub lm_challenge_response: LmChallengeResponse<'a>,
+    pub lm_challenge_response: Option<LmChallengeResponse<'a>>,
     // A field containing `NtChallengeResponse` information.
-    pub nt_challenge_response: NtChallengeResponse<'a>,
+    pub nt_challenge_response: Option<NtChallengeResponse<'a>>,
     /// A field containing DomainName information.
     pub domain_name: Cow<'a, [u8]>,
     /// A field containing UserName information.
@@ -814,7 +1015,7 @@ pub struct AuthenticateMessage<'a> {
     /// A field containing Workstation information.
     pub workstation_name: Cow<'a, [u8]>,
     /// A field containing EncryptedRandomSessionKey information.
-    pub encrypted_random_session_key: Option<Cow<'a, [u8]>>,
+    pub session_key: Option<Cow<'a, [u8]>>,
     /// This structure should be used for debugging purposes only.
     pub version: Option<Version>,
     /// The message integrity for the NTLM `NegotiateMessage`, `ChallengeMessage`, and `AuthenticateMessage`.
@@ -833,32 +1034,40 @@ impl<'a> AuthenticateMessage<'a> {
                     domain_name_field,
                     user_name_field,
                     workstation_name_field,
-                    encrypted_random_session_key_field,
+                    session_key_field,
                 ),
             ) => {
                 let offset = payload.len() - remaining.len();
 
-                if lm_challenge_response_field.length > 0 {
+                msg.lm_challenge_response = if lm_challenge_response_field.length > 0 {
                     let data = lm_challenge_response_field.extract_data(remaining, offset)?;
 
-                    msg.lm_challenge_response = if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
-                        parse_lm_response_v1(data)
-                    } else {
-                        parse_lm_response_v2(data)
-                    }.to_full_result()
-                        .map_err(NtlmError::from)?;
-                }
+                    Some(
+                        if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
+                            parse_lm_response_v1(data)
+                        } else {
+                            parse_lm_response_v2(data)
+                        }.to_full_result()
+                            .map_err(NtlmError::from)?,
+                    )
+                } else {
+                    None
+                };
 
-                if nt_challenge_response_field.length > 0 {
+                msg.nt_challenge_response = if nt_challenge_response_field.length > 0 {
                     let data = nt_challenge_response_field.extract_data(remaining, offset)?;
 
-                    msg.nt_challenge_response = if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
-                        parse_nt_response_v1(data)
-                    } else {
-                        parse_nt_response_v2(data)
-                    }.to_full_result()
-                        .map_err(NtlmError::from)?;
-                }
+                    Some(
+                        if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
+                            parse_nt_response_v1(data)
+                        } else {
+                            parse_nt_response_v2(data)
+                        }.to_full_result()
+                            .map_err(NtlmError::from)?,
+                    )
+                } else {
+                    None
+                };
 
                 msg.domain_name = Cow::from(domain_name_field.extract_data(remaining, offset)?);
                 msg.user_name = Cow::from(user_name_field.extract_data(remaining, offset)?);
@@ -866,10 +1075,9 @@ impl<'a> AuthenticateMessage<'a> {
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
-                    && encrypted_random_session_key_field.length > 0
+                    && session_key_field.length > 0
                 {
-                    msg.encrypted_random_session_key =
-                        Some(Cow::from(encrypted_random_session_key_field.extract_data(remaining, offset)?))
+                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
                 }
 
                 Ok(msg)
@@ -910,12 +1118,11 @@ impl<'a> WriteTo for AuthenticateMessage<'a> {
             header_size + self.domain_name.len() + self.user_name.len() + self.workstation_name.len()
         );
 
-        response_offset += self.encrypted_random_session_key
-            .write_field(buf, response_offset)?;
+        response_offset += self.session_key.write_field(buf, response_offset)?;
 
         let mut flags = self.flags;
 
-        if self.encrypted_random_session_key.is_some() {
+        if self.session_key.is_some() {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH;
         }
 
@@ -940,7 +1147,7 @@ impl<'a> WriteTo for AuthenticateMessage<'a> {
         self.lm_challenge_response.write_to(buf)?;
         self.nt_challenge_response.write_to(buf)?;
 
-        self.encrypted_random_session_key.write_to(buf)?;
+        self.session_key.write_to(buf)?;
 
         Ok(response_offset)
     }
@@ -1082,7 +1289,7 @@ named!(
         domain_name_field: call!(parse_field) >>
         user_name_field: call!(parse_field) >>
         workstation_name_field: call!(parse_field) >>
-        encrypted_random_session_key_field: call!(parse_field) >>
+        session_key_field: call!(parse_field) >>
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
         version:
             cond!(
@@ -1091,12 +1298,12 @@ named!(
             ) >>
         (
             AuthenticateMessage {
-                lm_challenge_response: LmChallengeResponse::V1 { response: Default::default() },
-                nt_challenge_response: NtChallengeResponse::V1 { response: Default::default() },
+                lm_challenge_response: None,
+                nt_challenge_response: None,
                 domain_name: Default::default(),
                 user_name: Default::default(),
                 workstation_name: Default::default(),
-                encrypted_random_session_key: Default::default(),
+                session_key: Default::default(),
                 flags,
                 version,
                 mic: None,
@@ -1106,7 +1313,7 @@ named!(
             domain_name_field,
             user_name_field,
             workstation_name_field,
-            encrypted_random_session_key_field
+            session_key_field
         )
     )
 );
@@ -1189,6 +1396,16 @@ pub trait WriteTo {
     fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error>;
 }
 
+impl<T: WriteTo> WriteTo for Option<T> {
+    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+        if let Some(ref data) = *self {
+            data.write_to(buf)
+        } else {
+            Ok(0)
+        }
+    }
+}
+
 impl<'a> WriteTo for Cow<'a, [u8]> {
     fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_slice(self.as_ref());
@@ -1197,32 +1414,14 @@ impl<'a> WriteTo for Cow<'a, [u8]> {
     }
 }
 
-impl<'a> WriteTo for Option<Cow<'a, [u8]>> {
-    fn write_to<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
-        if let Some(ref data) = *self {
-            buf.put_slice(data);
-
-            Ok(data.len())
-        } else {
-            Ok(0)
-        }
-    }
-}
-
 trait WriteField {
     fn write_field<B: BufMut>(&self, buf: &mut B, offset: usize) -> Result<usize, Error>;
 }
 
-impl<D: AsRef<[u8]>> WriteField for Option<D> {
+impl<T: WriteField> WriteField for Option<T> {
     fn write_field<B: BufMut>(&self, buf: &mut B, offset: usize) -> Result<usize, Error> {
-        if let Some(ref data) = self.as_ref() {
-            let data_size = data.as_ref().len();
-
-            buf.put_u16::<LittleEndian>(data_size as u16);
-            buf.put_u16::<LittleEndian>(data_size as u16);
-            buf.put_u32::<LittleEndian>(offset as u32);
-
-            Ok(data_size)
+        if let Some(ref data) = *self {
+            data.write_field(buf, offset)
         } else {
             buf.put_u16::<LittleEndian>(0);
             buf.put_u16::<LittleEndian>(0);
@@ -1273,17 +1472,21 @@ named!(
 mod tests {
     use super::*;
 
+    const username: &str = "User";
+    const password: &str = "Password";
+    const domain: Option<&str> = Some("Domain");
+
     #[test]
     fn ntlm_v1_authentication() {
         assert_eq!(
-            nt_owf_v1("User", "Password", Some("Domain")).as_slice(),
+            nt_owf_v1(password).as_slice(),
             &[
                 0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
             ][..]
         );
 
         assert_eq!(
-            lm_owf_v1("User", "Password", Some("Domain")).as_slice(),
+            lm_owf_v1(password).as_slice(),
             &[
                 0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
             ][..]
@@ -1293,14 +1496,14 @@ mod tests {
     #[test]
     fn ntlm_v2_authentication() {
         assert_eq!(
-            nt_owf_v2("User", "Password", Some("Domain")).as_slice(),
+            nt_owf_v2(username, password, domain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
         );
 
         assert_eq!(
-            lm_owf_v2("User", "Password", Some("Domain")).as_slice(),
+            lm_owf_v2(username, password, domain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
@@ -1336,8 +1539,9 @@ mod tests {
             0x6d, 0x79, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e  // Workstation
         ];
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         let message = NegotiateMessage {
-            flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLM_NEGOTIATE_OEM
+            flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
                 | NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED
                 | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED
@@ -1422,6 +1626,7 @@ mod tests {
             0x00, 0x00
         ];
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         let message = ChallengeMessage {
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
                 | NegotiateFlags::NTLMSSP_TARGET_TYPE_DOMAIN
@@ -1495,24 +1700,25 @@ mod tests {
             0xdf, 0x46, 0x80, 0xf3, 0x99, 0x58, 0xfb, 0x8c, 0x21, 0x3a, 0x9c, 0xc6,
         ];
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         let message = AuthenticateMessage {
             flags: NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM,
-            lm_challenge_response: LmChallengeResponse::V1 {
+            lm_challenge_response: Some(LmChallengeResponse::V1 {
                 response: Cow::from(vec![
                     0xc3, 0x37, 0xcd, 0x5c, 0xbd, 0x44, 0xfc, 0x97, 0x82, 0xa6, 0x67, 0xaf, 0x6d, 0x42, 0x7c, 0x6d,
                     0xe6, 0x7c, 0x20, 0xc2, 0xd3, 0xe7, 0x7c, 0x56,
                 ]),
-            },
-            nt_challenge_response: NtChallengeResponse::V1 {
+            }),
+            nt_challenge_response: Some(NtChallengeResponse::V1 {
                 response: Cow::from(vec![
                     0x25, 0xa9, 0x8c, 0x1c, 0x31, 0xe8, 0x18, 0x47, 0x46, 0x6b, 0x29, 0xb2, 0xdf, 0x46, 0x80, 0xf3,
                     0x99, 0x58, 0xfb, 0x8c, 0x21, 0x3a, 0x9c, 0xc6,
                 ]),
-            },
+            }),
             domain_name: utf16("DOMAIN").into(),
             user_name: utf16("user").into(),
             workstation_name: utf16("WORKSTATION").into(),
-            encrypted_random_session_key: None,
+            session_key: None,
             version: None,
             mic: None,
         };

@@ -55,9 +55,9 @@ impl NtlmServer {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
         } else if negotiate_message
             .flags
-            .contains(NegotiateFlags::NTLM_NEGOTIATE_OEM)
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM)
         {
-            flags |= NegotiateFlags::NTLM_NEGOTIATE_OEM;
+            flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_OEM;
         }
 
         if negotiate_message
