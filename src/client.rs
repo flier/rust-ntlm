@@ -1,17 +1,20 @@
-use std::iter::FromIterator;
-
+use encoding::EncodingRef;
 use failure::Error;
 use generic_array::GenericArray;
-use rand::{thread_rng, Rng};
 use time::get_time;
 
 use errors::NtlmError;
-use proto::{oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags, NegotiateMessage,
-            NtChallengeResponse, NtlmSecurityLevel, Version, utf16};
+use proto::{generate_challenge, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
+            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, Version, utf16};
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct NtlmClient {
+    /// A string that indicates the name of the user.
     pub username: String,
+    /// Password of the user.
+    ///
+    /// If the password is longer than 14 characters, the LMOWF v1 cannot be computed.
+    /// For LMOWF v1, if the password is shorter than 14 characters, it is padded by appending zeroes.
     pub password: String,
     /// A domain name or a NetBIOS name that identifies a domain.
     pub domain_name: Option<String>,
@@ -34,6 +37,10 @@ impl NtlmClient {
         let mut flags = NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
             | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
             | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
+
+        if self.require_128bit_encryption {
+            flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_128;
+        }
 
         if self.no_lm_response_ntlm_v1 {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY;
@@ -74,6 +81,14 @@ impl NtlmClient {
             bail!(NtlmError::UnsupportedFunction);
         }
 
+        if self.no_lm_response_ntlm_v1
+            && !challenge_message
+                .flags
+                .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
+        {
+            bail!(NtlmError::UnsupportedFunction);
+        }
+
         let support_unicode = challenge_message
             .flags
             .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE);
@@ -85,30 +100,25 @@ impl NtlmClient {
         };
 
         let curent_time = challenge_message
-            .target_info
-            .as_ref()
-            .and_then(|target_info| {
-                target_info
-                    .iter()
-                    .find(|av_pair| av_pair.id == AvId::Timestamp)
-            })
+            .get(AvId::Timestamp)
             .and_then(|av_pair| av_pair.to_timestamp())
             .unwrap_or_else(|| get_time().into());
         let server_challenge = GenericArray::from_slice(challenge_message.server_challenge.as_ref());
-        let client_challenge = GenericArray::from_iter(thread_rng().gen_iter().take(8));
 
         let (nt_challenge_response, lm_challenge_response) = match self.security_level {
             NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if challenge_message
                 .flags
                 .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
             {
+                let client_challenge = generate_challenge();
+
                 (
-                    NtChallengeResponse::v1_with_extended_session_security(
+                    NtChallengeResponse::with_extended_session_security(
                         &self.password,
                         server_challenge,
                         &client_challenge,
                     ),
-                    LmChallengeResponse::v1_with_extended_session_security(&client_challenge),
+                    LmChallengeResponse::with_extended_session_security(&client_challenge),
                 )
             } else {
                 (
@@ -125,23 +135,30 @@ impl NtlmClient {
                     Some(LmChallengeResponse::V1 { response }),
                 )
             }
-            NtlmSecurityLevel::Level3 | NtlmSecurityLevel::Level4 | NtlmSecurityLevel::Level5 => (
-                NtChallengeResponse::v2(
-                    &self.username,
-                    &self.password,
-                    self.domain_name.as_ref().map(|s| s.as_str()),
-                    server_challenge,
-                    &client_challenge,
-                    curent_time,
-                ),
-                LmChallengeResponse::v2(
-                    &self.username,
-                    &self.password,
-                    self.domain_name.as_ref().map(|s| s.as_str()),
-                    server_challenge,
-                    &client_challenge,
-                ),
-            ),
+            NtlmSecurityLevel::Level3 | NtlmSecurityLevel::Level4 | NtlmSecurityLevel::Level5 => {
+                if !challenge_message.contains(AvId::NbComputerName) || !challenge_message.contains(AvId::NbDomainName)
+                {
+                    bail!(NtlmError::LogonFailure);
+                }
+
+                (
+                    NtChallengeResponse::v2(
+                        &self.username,
+                        &self.password,
+                        self.domain_name.as_ref().map(|s| s.as_str()),
+                        server_challenge,
+                        &generate_challenge(),
+                        curent_time,
+                    ),
+                    LmChallengeResponse::v2(
+                        &self.username,
+                        &self.password,
+                        self.domain_name.as_ref().map(|s| s.as_str()),
+                        server_challenge,
+                        &generate_challenge(),
+                    ),
+                )
+            }
         };
 
         Ok(AuthenticateMessage {

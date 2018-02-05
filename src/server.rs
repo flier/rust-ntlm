@@ -1,13 +1,11 @@
 use std::borrow::Cow;
 
-use encoding::{EncoderTrap, Encoding};
-use encoding::codec::utf_16::UTF_16LE_ENCODING;
 use failure::Error;
 use rand::{thread_rng, Rng};
 
 use errors::NtlmError;
-use proto::{dns_computer_name, dns_domain_name, dns_tree_name, eol, nb_computer_name, nb_domain_name,
-            AuthenticateMessage, ChallengeMessage, NegotiateFlags, NegotiateMessage, NtlmMessage};
+use proto::{dns_computer_name, dns_domain_name, dns_tree_name, eol, nb_computer_name, nb_domain_name, oem,
+            AuthenticateMessage, ChallengeMessage, NegotiateFlags, NegotiateMessage, NtlmMessage, utf16};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NtlmServer {
@@ -82,18 +80,13 @@ impl NtlmServer {
             flags |= NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER;
         }
 
-        let target_name = if let Some(target_name) = target_name {
+        let target_name = target_name.map(|target_name| {
             if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE) {
-                UTF_16LE_ENCODING
-                    .encode(target_name, EncoderTrap::Ignore)
-                    .ok()
-                    .map(|v| v.into())
+                utf16(target_name)
             } else {
-                Some(target_name.as_bytes().to_owned().into())
-            }
-        } else {
-            None
-        };
+                oem(target_name)
+            }.into()
+        });
 
         let mut target_info = vec![];
 

@@ -14,6 +14,7 @@ use failure::Error;
 use itertools;
 use nom;
 use num::FromPrimitive;
+use rand::{thread_rng, Rng};
 use time::{get_time, Timespec};
 
 use crypto::digest::Digest;
@@ -464,18 +465,14 @@ impl<'a> NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(
-                        domain_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(
-                        workstation_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
                 }
 
                 Ok(msg)
@@ -556,6 +553,16 @@ pub struct ChallengeMessage<'a> {
 }
 
 impl<'a> ChallengeMessage<'a> {
+    pub fn contains(&self, id: AvId) -> bool {
+        self.get(id).is_some()
+    }
+
+    pub fn get(&self, id: AvId) -> Option<&AvPair> {
+        self.target_info
+            .as_ref()
+            .and_then(|target_info| target_info.iter().find(|av_pair| av_pair.id == id))
+    }
+
     pub fn parse(payload: &'a [u8]) -> Result<ChallengeMessage<'a>, Error> {
         match parse_challenge_message(payload) {
             nom::IResult::Done(remaining, (mut msg, target_name_field, target_info_field)) => {
@@ -566,9 +573,7 @@ impl<'a> ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(
-                        target_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
@@ -629,9 +634,7 @@ impl<'a> WriteTo for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| {
-                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
-                })
+                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -736,6 +739,13 @@ fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray
     GenericArray::from_iter(data.into_iter())
 }
 
+pub type ServerChallenge = GenericArray<u8, U8>;
+pub type ClientChallenge = GenericArray<u8, U8>;
+
+pub fn generate_challenge() -> GenericArray<u8, U8> {
+    GenericArray::from_iter(thread_rng().gen_iter().take(8))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum LmChallengeResponse<'a> {
     V1 {
@@ -761,9 +771,7 @@ impl<'a> LmChallengeResponse<'a> {
         }
     }
 
-    pub fn v1_with_extended_session_security(
-        client_challenge: &GenericArray<u8, U8>,
-    ) -> Option<LmChallengeResponse<'a>> {
+    pub fn with_extended_session_security(client_challenge: &GenericArray<u8, U8>) -> Option<LmChallengeResponse<'a>> {
         let mut lm_response_data = vec![];
 
         lm_response_data.extend_from_slice(client_challenge.as_slice());
@@ -862,7 +870,7 @@ impl<'a> NtChallengeResponse<'a> {
         }
     }
 
-    pub fn v1_with_extended_session_security(
+    pub fn with_extended_session_security(
         password: &str,
         server_challenge: &GenericArray<u8, U8>,
         client_challenge: &GenericArray<u8, U8>,
@@ -1085,9 +1093,7 @@ impl<'a> AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && session_key_field.length > 0
                 {
-                    msg.session_key = Some(Cow::from(
-                        session_key_field.extract_data(remaining, offset)?,
-                    ))
+                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
                 }
 
                 Ok(msg)
@@ -1491,44 +1497,14 @@ mod tests {
         assert_eq!(
             nt_owf_v1(password).as_slice(),
             &[
-                0xa4,
-                0xf4,
-                0x9c,
-                0x40,
-                0x65,
-                0x10,
-                0xbd,
-                0xca,
-                0xb6,
-                0x82,
-                0x4e,
-                0xe7,
-                0xc3,
-                0x0f,
-                0xd8,
-                0x52
+                0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
             ][..]
         );
 
         assert_eq!(
             lm_owf_v1(password).as_slice(),
             &[
-                0xe5,
-                0x2c,
-                0xac,
-                0x67,
-                0x41,
-                0x9a,
-                0x9a,
-                0x22,
-                0x4a,
-                0x3b,
-                0x10,
-                0x8f,
-                0x3f,
-                0xa6,
-                0xcb,
-                0x6d
+                0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
             ][..]
         );
     }
@@ -1538,44 +1514,14 @@ mod tests {
         assert_eq!(
             nt_owf_v2(username, password, domain).as_slice(),
             &[
-                0x0c,
-                0x86,
-                0x8a,
-                0x40,
-                0x3b,
-                0xfd,
-                0x7a,
-                0x93,
-                0xa3,
-                0x00,
-                0x1e,
-                0xf2,
-                0x2e,
-                0xf0,
-                0x2e,
-                0x3f
+                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
         );
 
         assert_eq!(
             lm_owf_v2(username, password, domain).as_slice(),
             &[
-                0x0c,
-                0x86,
-                0x8a,
-                0x40,
-                0x3b,
-                0xfd,
-                0x7a,
-                0x93,
-                0xa3,
-                0x00,
-                0x1e,
-                0xf2,
-                0x2e,
-                0xf0,
-                0x2e,
-                0x3f
+                0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
         );
     }
