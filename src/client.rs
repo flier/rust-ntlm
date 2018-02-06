@@ -160,6 +160,7 @@ impl NtlmClient {
                     server_challenge,
                     &generate_challenge(),
                     curent_time,
+                    vec![],
                 );
                 let lm_challenge_response = LmChallengeResponse::v2(
                     username,

@@ -201,7 +201,7 @@ pub fn target_name<'a>(target_name: &str) -> AvPair<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FileTime {
     pub lo: u32,
     pub hi: u32,
@@ -1072,6 +1072,7 @@ impl<'a> NtChallengeResponse<'a> {
         server_challenge: &GenericArray<u8, U8>,
         client_challenge: &GenericArray<u8, U8>,
         current_time: FileTime,
+        context: Vec<AvPair<'a>>,
     ) -> Option<NtChallengeResponse<'a>> {
         if username.is_empty() || password.is_empty() || domain.is_none() {
             None
@@ -1082,7 +1083,7 @@ impl<'a> NtChallengeResponse<'a> {
             let client_challenge = NtlmClientChalenge {
                 timestamp: current_time.into(),
                 challenge: client_challenge.to_vec().into(),
-                context: vec![],
+                context,
             };
 
             client_challenge.to_wire(&mut client_data).unwrap();
@@ -1090,10 +1091,10 @@ impl<'a> NtChallengeResponse<'a> {
             let mut hmac = Hmac::new(Md5::new(), &nt_response_key);
             hmac.input(server_challenge);
             hmac.input(&client_data);
-            let nt_response_data: GenericArray<u8, U16> = GenericArray::from_iter(hmac.result().code().iter().cloned());
+            let nt_proof_str: GenericArray<u8, U16> = GenericArray::from_iter(hmac.result().code().iter().cloned());
 
             Some(NtChallengeResponse::V2 {
-                response: nt_response_data.to_vec().into(),
+                response: nt_proof_str.to_vec().into(),
                 challenge: client_challenge,
             })
         }
@@ -1155,11 +1156,14 @@ pub struct NtlmClientChalenge<'a> {
 
 impl<'a> NtlmClientChalenge<'a> {
     pub fn size(&self) -> usize {
-        kNtlmClientChalengeHeaderSize + kTimestampSize + self.challenge.len() + 4
+        kNtlmClientChalengeHeaderSize + kTimestampSize + self.challenge.len() + 8
             + self.context
                 .iter()
                 .map(|av_pair| av_pair.size())
-                .sum::<usize>()
+                .sum::<usize>() + match self.context.last() {
+            Some(av_pair) if av_pair.id == AvId::EOL => 0,
+            _ => eol().size(),
+        }
     }
 }
 
@@ -1176,6 +1180,15 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
         for av_pair in &self.context {
             av_pair.to_wire(buf)?;
         }
+
+        match self.context.last() {
+            Some(av_pair) if av_pair.id == AvId::EOL => {}
+            _ => {
+                eol().to_wire(buf)?;
+            }
+        }
+
+        buf.put_u32::<LittleEndian>(0); // Reserved4
 
         Ok(self.size())
     }
@@ -1675,10 +1688,10 @@ mod tests {
     const kUsername: &str = "User";
     const kPassword: &str = "Password";
     const kDomain: &str = "Domain";
+    const kServer: &str = "Server";
+    const kWorkstation: &str = "COMPUTER";
 
     lazy_static! {
-        static ref kServerName: Vec<u8> = utf16("Server");
-        static ref kWorkstationName: Vec<u8> = utf16("COMPUTER");
         static ref kRandomSessionKey: GenericArray<u8, U16> = GenericArray::from_iter(iter::repeat(0x55).take(16));
         static ref kTime: FileTime = FileTime::from(0);
         static ref kChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH
@@ -1923,6 +1936,128 @@ mod tests {
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
+        );
+
+        let nt_challenge_response = NtChallengeResponse::v2(
+            kUsername,
+            kPassword,
+            Some(kDomain),
+            &*kServerChallenge,
+            &*kClientChallenge,
+            *kTime,
+            vec![nb_domain_name(kDomain), nb_computer_name(kServer)],
+        ).unwrap();
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        const client_challenge: &[u8] = &[
+            // RespType (1 byte):
+            0x01,
+            // HiRespType (1 byte):
+            0x01,
+            // Reserved1 (2 bytes):
+            0x00, 0x00,
+            // Reserved2 (4 bytes):
+            0x00, 0x00, 0x00, 0x00,
+            // TimeStamp (8 bytes):
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // ChallengeFromClient (8 bytes):
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+            // Reserved3 (4 bytes):
+            0x00, 0x00, 0x00, 0x00,
+            // AvPairs (variable):
+            // MsvAvNbDomainName (Domain)
+            //   AvId (2 bytes):
+            0x02, 0x00,
+            //   AvLen (2 bytes):
+            0x0c, 0x00,
+            //   Value (variable):
+            0x44, 0x00, 0x6f, 0x00, 0x6d, 0x00, 0x61, 0x00, 0x69, 0x00, 0x6e, 0x00,
+            // MsvAvNbComputerName (Server)
+            //   AvId (2 bytes):
+            0x01, 0x00,
+            //   AvLen (2 bytes):
+            0x0c, 0x00,
+            //   Value (variable):
+            0x53, 0x00, 0x65, 0x00, 0x72, 0x00, 0x76, 0x00, 0x65, 0x00, 0x72, 0x00,
+            // NbEOL
+            0x00, 0x00, 0x00, 0x00,
+            // Reserved
+            0x00, 0x00, 0x00, 0x00
+        ];
+
+        match nt_challenge_response {
+            NtChallengeResponse::V2 {
+                ref response,
+                ref challenge,
+            } => {
+                assert_eq!(response.as_ref(), &[
+                    0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb, 0xef, 0x6a, 0x1c
+                ][..]);
+
+                let mut buf = vec![];
+
+                assert_eq!(challenge.to_wire(&mut buf).unwrap(), client_challenge.len());
+                assert_eq!(buf.as_slice(), client_challenge);
+            }
+            _ => panic!(),
+        }
+        let nt_response = nt_challenge_response.response();
+        let nt_proof_str = GenericArray::from_slice(nt_response.as_ref());
+
+        assert_eq!(
+            generate_session_base_key_v2(kUsername, kPassword, Some(kDomain), nt_proof_str).as_slice(),
+            &[
+                0x8d,
+                0xe4,
+                0x0c,
+                0xca,
+                0xdb,
+                0xc1,
+                0x4a,
+                0x82,
+                0xf1,
+                0x5c,
+                0xb0,
+                0xad,
+                0x0d,
+                0xe9,
+                0x5c,
+                0xa3
+            ][..]
+        );
+
+        let lm_challenge_response = LmChallengeResponse::v2(
+            kUsername,
+            kPassword,
+            Some(kDomain),
+            &*kServerChallenge,
+            &*kClientChallenge,
+        ).unwrap();
+
+        assert_eq!(
+            lm_challenge_response,
+            LmChallengeResponse::V2 {
+                response: (&[
+                    0x86,
+                    0xc3,
+                    0x50,
+                    0x97,
+                    0xac,
+                    0x9c,
+                    0xec,
+                    0x10,
+                    0x25,
+                    0x54,
+                    0x76,
+                    0x4a,
+                    0x57,
+                    0xcc,
+                    0xcc,
+                    0x19
+                ][..])
+                    .into(),
+                challenge: (&[0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA][..]).into(),
+            }
         );
     }
 
