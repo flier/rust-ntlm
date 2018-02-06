@@ -234,16 +234,22 @@ impl From<FileTime> for Timespec {
     }
 }
 
+impl From<u64> for FileTime {
+    fn from(n: u64) -> Self {
+        FileTime {
+            lo: (n & ((1 << 32) - 1)) as u32,
+            hi: (n >> 32) as u32,
+        }
+    }
+}
+
 impl From<Timespec> for FileTime {
     fn from(ts: Timespec) -> Self {
         let sec = ts.sec + (INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC) as i64;
         let nsec = ts.nsec as u64 / INTERVALS_PER_SEC;
         let intervals = (sec as u64 * INTERVALS_PER_SEC + nsec) as u64;
 
-        FileTime {
-            lo: (intervals & ((1 << 32) - 1)) as u32,
-            hi: (intervals >> 32) as u32,
-        }
+        FileTime::from(intervals)
     }
 }
 
@@ -469,14 +475,18 @@ impl<'a> FromWire<'a> for NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
+                    msg.domain_name = Some(Cow::from(
+                        domain_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
+                    msg.workstation_name = Some(Cow::from(
+                        workstation_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 Ok(msg)
@@ -562,9 +572,9 @@ impl<'a> ChallengeMessage<'a> {
     }
 
     pub fn get(&self, id: AvId) -> Option<&AvPair> {
-        self.target_info
-            .as_ref()
-            .and_then(|target_info| target_info.iter().find(|av_pair| av_pair.id == id))
+        self.target_info.as_ref().and_then(|target_info| {
+            target_info.iter().find(|av_pair| av_pair.id == id)
+        })
     }
 }
 
@@ -581,7 +591,9 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
+                    msg.target_name = Some(Cow::from(
+                        target_name_field.extract_data(remaining, offset)?,
+                    ));
                 }
 
                 if msg.flags
@@ -642,7 +654,9 @@ impl<'a> ToWire for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
+                .map(|av_pair| {
+                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
+                })
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -744,7 +758,7 @@ fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray
         Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
     }
 
-    GenericArray::from_iter(data.into_iter())
+    GenericArray::from_iter(buf.into_iter())
 }
 
 pub type ServerChallenge = GenericArray<u8, U8>;
@@ -1124,7 +1138,9 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && session_key_field.length > 0
                 {
-                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
+                    msg.session_key = Some(Cow::from(
+                        session_key_field.extract_data(remaining, offset)?,
+                    ))
                 }
 
                 Ok(msg)
@@ -1525,38 +1541,92 @@ named!(
 mod tests {
     use super::*;
 
-    const username: &str = "User";
-    const password: &str = "Password";
-    const domain: Option<&str> = Some("Domain");
+    const kUsername: &str = "User";
+    const kPassword: &str = "Password";
+    const kDomain: Option<&str> = Some("Domain");
+
+    lazy_static! {
+        static ref kServerName: Vec<u8> = utf16("Server");
+        static ref kWorkstationName: Vec<u8> = utf16("COMPUTER");
+        static ref kRandomSessionKey: Vec<u8> = iter::repeat(0x55).take(16).collect();
+        static ref kTime: FileTime = FileTime::from(0);
+        static ref kChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_56
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_128
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION
+                                                    | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SEAL
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
+                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
+        static ref kClientChallenge: GenericArray<u8, U8> = arr![u8; 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
+        static ref kServerChallenge: GenericArray<u8, U8> = arr![u8; 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+    }
 
     #[test]
     fn ntlm_v1_authentication() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            nt_owf_v1(password).as_slice(),
+            nt_owf_v1(kPassword).as_slice(),
             &[
                 0xa4, 0xf4, 0x9c, 0x40, 0x65, 0x10, 0xbd, 0xca, 0xb6, 0x82, 0x4e, 0xe7, 0xc3, 0x0f, 0xd8, 0x52
             ][..]
         );
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            lm_owf_v1(password).as_slice(),
+            lm_owf_v1(kPassword).as_slice(),
             &[
                 0xe5, 0x2c, 0xac, 0x67, 0x41, 0x9a, 0x9a, 0x22, 0x4a, 0x3b, 0x10, 0x8f, 0x3f, 0xa6, 0xcb, 0x6d
             ][..]
+        );
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        assert_eq!(
+            generate_session_base_key_v1(kPassword).as_slice(),
+            &[
+                0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb, 0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84
+            ][..]
+        );
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        assert_eq!(
+            NtChallengeResponse::v1(&kPassword, &*kServerChallenge),
+            Some(NtChallengeResponse::V1 {
+                response: vec![
+                    0x67, 0xc4, 0x30, 0x11, 0xf3, 0x02, 0x98, 0xa2, 0xad, 0x35, 0xec, 0xe6, 0x4f, 0x16, 0x33, 0x1c,
+                    0x44, 0xbd, 0xbe, 0xd9, 0x27, 0x84, 0x1f, 0x94,
+                ].into(),
+            })
+        );
+
+        #[cfg_attr(rustfmt, rustfmt_skip)]
+        assert_eq!(
+            LmChallengeResponse::v1(&kPassword, &*kServerChallenge),
+            Some(LmChallengeResponse::V1 {
+                response: vec![
+                    0x98, 0xde, 0xf7, 0xb8, 0x7f, 0x88, 0xaa, 0x5d, 0xaf, 0xe2, 0xdf, 0x77, 0x96, 0x88, 0xa1, 0x72,
+                    0xde, 0xf1, 0x1c, 0x7d, 0x5c, 0xcd, 0xef, 0x13
+                ].into(),
+            })
         );
     }
 
     #[test]
     fn ntlm_v2_authentication() {
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            nt_owf_v2(username, password, domain).as_slice(),
+            nt_owf_v2(kUsername, kPassword, kDomain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
         );
 
+        #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            lm_owf_v2(username, password, domain).as_slice(),
+            lm_owf_v2(kUsername, kPassword, kDomain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]

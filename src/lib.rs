@@ -30,6 +30,10 @@ extern crate time;
 #[macro_use]
 extern crate hyper;
 
+#[cfg(test)]
+#[macro_use]
+extern crate lazy_static;
+
 mod errors;
 #[macro_use]
 pub mod proto;
