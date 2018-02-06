@@ -21,6 +21,8 @@ use crypto::digest::Digest;
 use crypto::hmac::Hmac;
 use crypto::mac::Mac;
 use crypto::md5::Md5;
+use crypto::rc4::Rc4;
+use crypto::symmetriccipher::Encryptor;
 use des::{BlockCipher, Des};
 use generic_array::GenericArray;
 use generic_array::typenum::{U16, U24, U7, U8};
@@ -475,18 +477,14 @@ impl<'a> FromWire<'a> for NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(
-                        domain_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(
-                        workstation_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
                 }
 
                 Ok(msg)
@@ -572,9 +570,9 @@ impl<'a> ChallengeMessage<'a> {
     }
 
     pub fn get(&self, id: AvId) -> Option<&AvPair> {
-        self.target_info.as_ref().and_then(|target_info| {
-            target_info.iter().find(|av_pair| av_pair.id == id)
-        })
+        self.target_info
+            .as_ref()
+            .and_then(|target_info| target_info.iter().find(|av_pair| av_pair.id == id))
     }
 }
 
@@ -591,9 +589,7 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(
-                        target_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
@@ -654,9 +650,7 @@ impl<'a> ToWire for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| {
-                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
-                })
+                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -768,12 +762,10 @@ pub fn generate_challenge() -> GenericArray<u8, U8> {
     GenericArray::from_iter(thread_rng().gen_iter().take(8))
 }
 
-pub type SessionKey = GenericArray<u8, U16>;
+pub type SessionBaseKey = GenericArray<u8, U16>;
 
-pub fn generate_session_base_key_v1<S: AsRef<str>>(password: S) -> SessionKey {
-    let nt_response_key = nt_owf_v1(password);
-
-    GenericArray::from_iter(Md4::digest(nt_response_key.as_slice()))
+pub fn generate_session_base_key_v1<S: AsRef<str>>(password: S) -> SessionBaseKey {
+    GenericArray::from_iter(Md4::digest(nt_owf_v1(password).as_slice()))
 }
 
 pub fn generate_session_base_key_v2<S: AsRef<str>>(
@@ -781,12 +773,55 @@ pub fn generate_session_base_key_v2<S: AsRef<str>>(
     password: S,
     domain: Option<S>,
     nt_proof_str: &GenericArray<u8, U16>,
-) -> SessionKey {
+) -> SessionBaseKey {
     let nt_response_key = nt_owf_v2(username, password, domain);
 
     let mut hmac = Hmac::new(Md5::new(), nt_response_key.as_slice());
     hmac.input(nt_proof_str.as_slice());
     GenericArray::from_iter(hmac.result().code().iter().cloned())
+}
+
+pub type KeyExchangeKey = GenericArray<u8, U16>;
+
+pub fn generate_key_exchange_key<S: AsRef<str>>(
+    flags: NegotiateFlags,
+    password: S,
+    session_base_key: &SessionBaseKey,
+    server_challenge: &ServerChallenge,
+    lm_challenge_response: &GenericArray<u8, U24>,
+) -> KeyExchangeKey {
+    let lmowf = lm_owf_v1(password);
+
+    if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY) {
+        let mut hmac = Hmac::new(Md5::new(), session_base_key.as_slice());
+
+        hmac.input(server_challenge.as_slice());
+        hmac.input(&lm_challenge_response.as_slice()[..8]);
+
+        GenericArray::from_iter(hmac.result().code().iter().cloned())
+    } else if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_LM_KEY) {
+        let key = lmowf
+            .into_iter()
+            .take(8)
+            .chain(iter::repeat(0xBD))
+            .take(14)
+            .collect::<Vec<u8>>();
+
+        let mut buf = itertools::repeat_n(&lm_challenge_response.as_slice()[..8], 2)
+            .flat_map(|data| data.iter())
+            .cloned()
+            .collect::<Vec<u8>>();
+
+        for (key, buf) in key.chunks(7).zip(buf.chunks_mut(8)) {
+            Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
+        }
+
+        KeyExchangeKey::from_iter(buf.into_iter())
+    } else if flags.contains(NegotiateFlags::NTLMSSP_REQUEST_NON_NT_SESSION_KEY) {
+        KeyExchangeKey::from_iter(lmowf.into_iter().take(8).chain(iter::repeat(0)).take(16))
+    } else {
+        session_base_key.clone()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -845,6 +880,12 @@ impl<'a> LmChallengeResponse<'a> {
                 response: lm_response_data.as_slice().to_vec().into(),
                 challenge: client_challenge.as_slice().to_vec().into(),
             })
+        }
+    }
+
+    pub fn response(&self) -> Cow<'a, [u8]> {
+        match *self {
+            LmChallengeResponse::V1 { ref response } | LmChallengeResponse::V2 { ref response, .. } => response.clone(),
         }
     }
 }
@@ -1138,9 +1179,7 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && session_key_field.length > 0
                 {
-                    msg.session_key = Some(Cow::from(
-                        session_key_field.extract_data(remaining, offset)?,
-                    ))
+                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
                 }
 
                 Ok(msg)
@@ -1539,6 +1578,8 @@ named!(
 
 #[cfg(test)]
 mod tests {
+    use crypto::buffer::{BufferResult, RefReadBuffer, RefWriteBuffer};
+
     use super::*;
 
     const kUsername: &str = "User";
@@ -1548,7 +1589,7 @@ mod tests {
     lazy_static! {
         static ref kServerName: Vec<u8> = utf16("Server");
         static ref kWorkstationName: Vec<u8> = utf16("COMPUTER");
-        static ref kRandomSessionKey: Vec<u8> = iter::repeat(0x55).take(16).collect();
+        static ref kRandomSessionKey: GenericArray<u8, U16> = GenericArray::from_iter(iter::repeat(0x55).take(16));
         static ref kTime: FileTime = FileTime::from(0);
         static ref kChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_56
@@ -1563,6 +1604,17 @@ mod tests {
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
         static ref kClientChallenge: GenericArray<u8, U8> = arr![u8; 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
         static ref kServerChallenge: GenericArray<u8, U8> = arr![u8; 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        static ref kSessionBaseKey: GenericArray<u8, U16> = arr![u8; 0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb,
+                                                                     0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84];
+        static ref  kNtChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
+            0x67, 0xc4, 0x30, 0x11, 0xf3, 0x02, 0x98, 0xa2, 0xad, 0x35, 0xec, 0xe6, 0x4f, 0x16, 0x33, 0x1c, 0x44, 0xbd,
+            0xbe, 0xd9, 0x27, 0x84, 0x1f, 0x94
+        ];
+
+        static ref kLmChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
+            0x98, 0xde, 0xf7, 0xb8, 0x7f, 0x88, 0xaa, 0x5d, 0xaf, 0xe2, 0xdf, 0x77, 0x96, 0x88, 0xa1, 0x72, 0xde, 0xf1,
+            0x1c, 0x7d, 0x5c, 0xcd, 0xef, 0x13
+        ];
     }
 
     #[test]
@@ -1586,19 +1638,14 @@ mod tests {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
             generate_session_base_key_v1(kPassword).as_slice(),
-            &[
-                0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb, 0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84
-            ][..]
+            kSessionBaseKey.as_slice()
         );
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
             NtChallengeResponse::v1(&kPassword, &*kServerChallenge),
             Some(NtChallengeResponse::V1 {
-                response: vec![
-                    0x67, 0xc4, 0x30, 0x11, 0xf3, 0x02, 0x98, 0xa2, 0xad, 0x35, 0xec, 0xe6, 0x4f, 0x16, 0x33, 0x1c,
-                    0x44, 0xbd, 0xbe, 0xd9, 0x27, 0x84, 0x1f, 0x94,
-                ].into(),
+                response: kNtChallengeResponseV1.as_slice().into(),
             })
         );
 
@@ -1606,11 +1653,109 @@ mod tests {
         assert_eq!(
             LmChallengeResponse::v1(&kPassword, &*kServerChallenge),
             Some(LmChallengeResponse::V1 {
-                response: vec![
-                    0x98, 0xde, 0xf7, 0xb8, 0x7f, 0x88, 0xaa, 0x5d, 0xaf, 0xe2, 0xdf, 0x77, 0x96, 0x88, 0xa1, 0x72,
-                    0xde, 0xf1, 0x1c, 0x7d, 0x5c, 0xcd, 0xef, 0x13
-                ].into(),
+                response: kLmChallengeResponseV1.as_slice().into(),
             })
+        );
+    }
+
+    #[test]
+    fn key_exchange_key() {
+        let key = generate_key_exchange_key(
+            *kChallengeFlags,
+            kPassword,
+            &*kSessionBaseKey,
+            &*kServerChallenge,
+            &*kLmChallengeResponseV1,
+        );
+        let mut buf = vec![0; 16];
+
+        match Rc4::new(key.as_slice())
+            .encrypt(
+                &mut RefReadBuffer::new(kRandomSessionKey.as_slice()),
+                &mut RefWriteBuffer::new(&mut buf),
+                true,
+            )
+            .unwrap()
+        {
+            BufferResult::BufferUnderflow => {}
+            BufferResult::BufferOverflow => panic!(),
+        }
+
+        assert_eq!(
+            buf.as_slice(),
+            &[
+                0x51, 0x88, 0x22, 0xb1, 0xb3, 0xf3, 0x50, 0xc8, 0x95, 0x86, 0x82, 0xec, 0xbb, 0x3e, 0x3c, 0xb7,
+            ][..]
+        );
+    }
+
+    #[test]
+    fn key_exchange_key_with_lm_key() {
+        let key = generate_key_exchange_key(
+            *kChallengeFlags | NegotiateFlags::NTLMSSP_NEGOTIATE_LM_KEY,
+            kPassword,
+            &*kSessionBaseKey,
+            &*kServerChallenge,
+            &*kLmChallengeResponseV1,
+        );
+
+        assert_eq!(
+            key.as_slice(),
+            &[
+                0xb0, 0x9e, 0x37, 0x9f, 0x7f, 0xbe, 0xcb, 0x1e, 0xaf, 0x0a, 0xfd, 0xcb, 0x03, 0x83, 0xc8, 0xa0
+            ][..]
+        );
+
+        let mut buf = vec![0; 16];
+
+        match Rc4::new(key.as_slice())
+            .encrypt(
+                &mut RefReadBuffer::new(kRandomSessionKey.as_slice()),
+                &mut RefWriteBuffer::new(&mut buf),
+                true,
+            )
+            .unwrap()
+        {
+            BufferResult::BufferUnderflow => {}
+            BufferResult::BufferOverflow => panic!(),
+        }
+
+        assert_eq!(
+            buf.as_slice(),
+            &[
+                0x4c, 0xd7, 0xbb, 0x57, 0xd6, 0x97, 0xef, 0x9b, 0x54, 0x9f, 0x02, 0xb8, 0xf9, 0xb3, 0x78, 0x64
+            ][..]
+        );
+    }
+
+    #[test]
+    fn key_exchange_key_with_request_non_nt_session_key() {
+        let key = generate_key_exchange_key(
+            *kChallengeFlags | NegotiateFlags::NTLMSSP_REQUEST_NON_NT_SESSION_KEY,
+            kPassword,
+            &*kSessionBaseKey,
+            &*kServerChallenge,
+            &*kLmChallengeResponseV1,
+        );
+        let mut buf = vec![0; 16];
+
+        match Rc4::new(key.as_slice())
+            .encrypt(
+                &mut RefReadBuffer::new(kRandomSessionKey.as_slice()),
+                &mut RefWriteBuffer::new(&mut buf),
+                true,
+            )
+            .unwrap()
+        {
+            BufferResult::BufferUnderflow => {}
+            BufferResult::BufferOverflow => panic!(),
+        }
+
+        assert_eq!(
+            buf.as_slice(),
+            &[
+                0x74, 0x52, 0xca, 0x55, 0xc2, 0x25, 0xa1, 0xca, 0x04, 0xb4, 0x8f, 0xae, 0x32, 0xcf, 0x56, 0xfc
+            ][..]
         );
     }
 

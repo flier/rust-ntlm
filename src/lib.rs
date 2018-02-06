@@ -33,6 +33,9 @@ extern crate hyper;
 #[cfg(test)]
 #[macro_use]
 extern crate lazy_static;
+#[cfg(test)]
+#[macro_use]
+extern crate matches;
 
 mod errors;
 #[macro_use]
