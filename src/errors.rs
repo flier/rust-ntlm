@@ -1,5 +1,8 @@
+use crypto::symmetriccipher::SymmetricCipherError;
 use nom;
 use num::FromPrimitive;
+
+use proto::NegotiateFlags;
 
 #[derive(Debug, Fail)]
 pub enum NtlmError {
@@ -11,13 +14,15 @@ pub enum NtlmError {
 
     #[fail(display = "message type mismatched")] MismatchedMsgType,
 
-    #[fail(display = "message offset overflow")] OffsetOverflow,
-
     #[fail(display = "unexpected message")] UnexpectedMessage,
 
-    #[fail(display = "unsupported function")] UnsupportedFunction,
+    #[fail(display = "unsupported function, {:?}", _0)] UnsupportedFunction(NegotiateFlags),
 
     #[fail(display = "logon failure")] LogonFailure,
+
+    #[fail(display = "buffer overflow")] BufferOverflow,
+
+    #[fail(display = "symmetric cipher error, {:?}", _0)] SymmetricCipher(SymmetricCipherError),
 }
 
 impl<I> From<nom::IError<I>> for NtlmError {
@@ -59,4 +64,10 @@ impl From<nom::ErrorKind> for NtlmError {
 pub enum ParseError {
     MismatchedSignature,
     MismatchedMsgType,
+}
+
+impl From<SymmetricCipherError> for NtlmError {
+    fn from(err: SymmetricCipherError) -> Self {
+        NtlmError::SymmetricCipher(err)
+    }
 }

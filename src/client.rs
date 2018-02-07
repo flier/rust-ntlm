@@ -1,11 +1,13 @@
+use crypto::rc4::Rc4;
 use failure::Error;
 use generic_array::GenericArray;
 use time::get_time;
 
 use errors::NtlmError;
-use proto::{generate_challenge, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
-            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, Version, generate_session_base_key_v1,
-            generate_session_base_key_v2, utf16};
+use proto::{generate_challenge, generate_key_exchange_key, generate_random_session_key, generate_seal_key,
+            generate_sign_key, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
+            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, SealKey, SessionKey, SignKey, Version,
+            generate_session_base_key_v1, generate_session_base_key_v2, rc4, utf16};
 
 #[derive(Clone, Debug, Default)]
 pub struct NtlmClient {
@@ -35,8 +37,9 @@ pub struct NtlmClient {
 impl NtlmClient {
     pub fn start_negotiate(&self) -> NegotiateMessage {
         let mut flags = NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
+            | NegotiateFlags::NTLMSSP_NEGOTIATE_56
             | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
-            | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
+            | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
 
         if self.require_128bit_encryption {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_128;
@@ -46,58 +49,64 @@ impl NtlmClient {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY;
         }
 
-        if self.version.is_none() {
-            NegotiateMessage {
-                flags,
-                domain_name: self.domain_name
-                    .as_ref()
-                    .map(|s| s.as_str().as_bytes().into()),
-                workstation_name: self.workstation_name
-                    .as_ref()
-                    .map(|s| s.as_str().as_bytes().into()),
-                version: None,
+        let (domain_name, workstation_name, version) = if self.version.is_none() {
+            if self.domain_name.is_some() {
+                flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED;
             }
+
+            if self.workstation_name.is_some() {
+                flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED;
+            }
+
+            (
+                self.domain_name.as_ref().map(|s| oem(s).into()),
+                self.workstation_name.as_ref().map(|s| oem(s).into()),
+                None,
+            )
         } else {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION;
 
-            NegotiateMessage {
-                flags,
-                domain_name: self.domain_name.as_ref().map(|s| oem(s).into()),
-                workstation_name: self.workstation_name.as_ref().map(|s| oem(s).into()),
-                version: self.version.clone(),
-            }
+            (None, None, self.version.clone())
+        };
+
+        NegotiateMessage {
+            flags,
+            domain_name,
+            workstation_name,
+            version,
         }
     }
 
     pub fn process_challenge<'a, 'b>(
         &self,
         challenge_message: &ChallengeMessage<'a>,
-    ) -> Result<AuthenticateMessage<'b>, Error> {
-        if self.require_128bit_encryption
-            && !challenge_message
-                .flags
-                .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_128)
-        {
-            bail!(NtlmError::UnsupportedFunction);
-        }
-
-        if self.no_lm_response_ntlm_v1
-            && !challenge_message
-                .flags
-                .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
-        {
-            bail!(NtlmError::UnsupportedFunction);
-        }
-
+    ) -> Result<(AuthenticateMessage<'b>, NtlmClientSession), Error> {
+        let support_128bit_encryption = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_128);
+        let support_extended_session_security = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY);
         let support_unicode = challenge_message
             .flags
             .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE);
-        let with_extended_session_security = challenge_message
-            .flags
-            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY);
         let support_message_sign = challenge_message
             .flags
             .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN);
+        let support_key_exchange = challenge_message
+            .flags
+            .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH);
+
+        if self.require_128bit_encryption && !support_128bit_encryption {
+            bail!(NtlmError::UnsupportedFunction(
+                NegotiateFlags::NTLMSSP_NEGOTIATE_128
+            ));
+        }
+        if self.no_lm_response_ntlm_v1 && !support_extended_session_security {
+            bail!(NtlmError::UnsupportedFunction(
+                NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
+            ));
+        }
 
         let flags = NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM | if support_unicode {
             NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE
@@ -113,21 +122,20 @@ impl NtlmClient {
         let mut session_base_key = None;
 
         let (nt_challenge_response, lm_challenge_response) = match self.security_level {
-            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if with_extended_session_security {
+            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if support_extended_session_security {
                 let client_challenge = generate_challenge();
+                let nt_challenge_response = NtChallengeResponse::with_extended_session_security(
+                    &self.password,
+                    server_challenge,
+                    &client_challenge,
+                );
+                let lm_challenge_response = LmChallengeResponse::with_extended_session_security(&client_challenge);
 
                 if support_message_sign {
                     session_base_key = Some(generate_session_base_key_v1(&self.password));
                 }
 
-                (
-                    NtChallengeResponse::with_extended_session_security(
-                        &self.password,
-                        server_challenge,
-                        &client_challenge,
-                    ),
-                    LmChallengeResponse::with_extended_session_security(&client_challenge),
-                )
+                (nt_challenge_response, lm_challenge_response)
             } else {
                 (
                     NtChallengeResponse::v1(&self.password, server_challenge),
@@ -185,7 +193,63 @@ impl NtlmClient {
             }
         };
 
-        Ok(AuthenticateMessage {
+        let mut encrypted_random_session_key = None;
+
+        let client_session = if let Some(session_base_key) = session_base_key {
+            let key_exchange_key = generate_key_exchange_key(
+                flags,
+                &self.password,
+                &session_base_key,
+                server_challenge,
+                GenericArray::from_slice(&lm_challenge_response.as_ref().unwrap().response().as_ref()[..8]),
+            );
+
+            let exported_session_key;
+
+            if support_key_exchange {
+                exported_session_key = generate_random_session_key();
+
+                encrypted_random_session_key = Some(rc4(&key_exchange_key, &exported_session_key)?.into());
+            } else {
+                exported_session_key = key_exchange_key;
+            }
+
+            let current_revision = self.version
+                .as_ref()
+                .map(|version| version.revision)
+                .unwrap_or_default();
+
+            let client_signing_key = generate_sign_key(flags, &exported_session_key, false);
+            let server_signing_key = generate_sign_key(flags, &exported_session_key, true);
+            let client_sealing_key = Some(generate_seal_key(
+                flags,
+                &exported_session_key,
+                false,
+                current_revision,
+            ));
+            let server_sealing_key = Some(generate_seal_key(
+                flags,
+                &exported_session_key,
+                true,
+                current_revision,
+            ));
+            let client_handle = client_sealing_key.as_ref().map(|key| Rc4::new(key));
+            let server_handle = server_sealing_key.as_ref().map(|key| Rc4::new(key));
+
+            NtlmClientSession {
+                exported_session_key,
+                client_signing_key,
+                server_signing_key,
+                client_sealing_key,
+                server_sealing_key,
+                client_handle,
+                server_handle,
+            }
+        } else {
+            NtlmClientSession::default()
+        };
+
+        let authenticate_message = AuthenticateMessage {
             flags,
             lm_challenge_response,
             nt_challenge_response,
@@ -204,9 +268,22 @@ impl NtlmClient {
                 .map_or_else(Default::default, |s| {
                     if support_unicode { utf16(s) } else { oem(s) }.into()
                 }),
-            session_key: None,
-            version: None,
+            session_key: encrypted_random_session_key,
+            version: self.version.clone(),
             mic: None,
-        })
+        };
+
+        Ok((authenticate_message, client_session))
     }
+}
+
+#[derive(Clone, Default)]
+pub struct NtlmClientSession {
+    exported_session_key: SessionKey,
+    client_signing_key: Option<SignKey>,
+    server_signing_key: Option<SignKey>,
+    client_sealing_key: Option<SealKey>,
+    server_sealing_key: Option<SealKey>,
+    client_handle: Option<Rc4>,
+    server_handle: Option<Rc4>,
 }
