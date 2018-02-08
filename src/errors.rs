@@ -1,3 +1,7 @@
+use std::error::Error;
+use std::str;
+use std::sync;
+
 use crypto::symmetriccipher::SymmetricCipherError;
 use nom;
 use num::FromPrimitive;
@@ -23,6 +27,12 @@ pub enum NtlmError {
     #[fail(display = "buffer overflow")] BufferOverflow,
 
     #[fail(display = "symmetric cipher error, {:?}", _0)] SymmetricCipher(SymmetricCipherError),
+
+    #[fail(display = "fail to decode UTF-8, {:?}", _0)] Utf8Error(#[cause] str::Utf8Error),
+
+    #[fail(display = "fail to decode UTF-16")] Utf16Error,
+
+    #[fail(display = "fail to lock mutex, {}", _0)] LockError(String),
 }
 
 impl<I> From<nom::IError<I>> for NtlmError {
@@ -69,5 +79,17 @@ pub enum ParseError {
 impl From<SymmetricCipherError> for NtlmError {
     fn from(err: SymmetricCipherError) -> Self {
         NtlmError::SymmetricCipher(err)
+    }
+}
+
+impl From<str::Utf8Error> for NtlmError {
+    fn from(err: str::Utf8Error) -> Self {
+        NtlmError::Utf8Error(err)
+    }
+}
+
+impl<T> From<sync::PoisonError<T>> for NtlmError {
+    fn from(err: sync::PoisonError<T>) -> Self {
+        NtlmError::LockError(err.description().to_owned())
     }
 }

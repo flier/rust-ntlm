@@ -123,12 +123,7 @@ impl<'a> AvPair<'a> {
 
     pub fn to_timestamp(&self) -> Option<FileTime> {
         if self.id == AvId::Timestamp && self.value.len() >= mem::size_of::<FileTime>() {
-            let mut cur = Cursor::new(self.value.as_ref());
-
-            Some(FileTime {
-                lo: cur.get_u32::<LittleEndian>(),
-                hi: cur.get_u32::<LittleEndian>(),
-            })
+            FileTime::from_wire(self.value.as_ref()).ok()
         } else {
             None
         }
@@ -159,6 +154,17 @@ pub fn eol<'a>() -> AvPair<'a> {
     AvPair {
         id: AvId::EOL,
         value: Default::default(),
+    }
+}
+
+pub fn timestamp<'a>(ts: Timespec) -> AvPair<'a> {
+    let mut buf = vec![];
+
+    FileTime::from(ts).to_wire(&mut buf).unwrap();
+
+    AvPair {
+        id: AvId::Timestamp,
+        value: buf.into(),
     }
 }
 
@@ -253,6 +259,32 @@ impl From<Timespec> for FileTime {
         let intervals = (sec as u64 * INTERVALS_PER_SEC + nsec) as u64;
 
         FileTime::from(intervals)
+    }
+}
+
+impl<'a> FromWire<'a> for FileTime {
+    type Type = FileTime;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error> {
+        if payload.len() < kFileTimeSize {
+            bail!(NtlmError::BufferOverflow)
+        }
+
+        let mut cur = Cursor::new(payload);
+
+        Ok(FileTime {
+            lo: cur.get_u32::<LittleEndian>(),
+            hi: cur.get_u32::<LittleEndian>(),
+        })
+    }
+}
+
+impl ToWire for FileTime {
+    fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
+        buf.put_u32::<LittleEndian>(self.lo);
+        buf.put_u32::<LittleEndian>(self.hi);
+
+        Ok(kFileTimeSize)
     }
 }
 
@@ -466,18 +498,14 @@ impl<'a> FromWire<'a> for NegotiateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
                     && domain_name_field.length > 0
                 {
-                    msg.domain_name = Some(Cow::from(
-                        domain_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.domain_name = Some(Cow::from(domain_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_WORKSTATION_SUPPLIED)
                     && workstation_name_field.length > 0
                 {
-                    msg.workstation_name = Some(Cow::from(
-                        workstation_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.workstation_name = Some(Cow::from(workstation_name_field.extract_data(remaining, offset)?));
                 }
 
                 Ok(msg)
@@ -563,9 +591,9 @@ impl<'a> ChallengeMessage<'a> {
     }
 
     pub fn get(&self, id: AvId) -> Option<&AvPair> {
-        self.target_info.as_ref().and_then(|target_info| {
-            target_info.iter().find(|av_pair| av_pair.id == id)
-        })
+        self.target_info
+            .as_ref()
+            .and_then(|target_info| target_info.iter().find(|av_pair| av_pair.id == id))
     }
 }
 
@@ -582,9 +610,7 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
                         | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER,
                 ) && target_name_field.length > 0
                 {
-                    msg.target_name = Some(Cow::from(
-                        target_name_field.extract_data(remaining, offset)?,
-                    ));
+                    msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
                 }
 
                 if msg.flags
@@ -645,9 +671,7 @@ impl<'a> ToWire for ChallengeMessage<'a> {
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
                 .iter()
-                .map(|av_pair| {
-                    kAvIdSize + kAvLenSize + av_pair.value.as_ref().len()
-                })
+                .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
                 .sum::<usize>();
 
             buf.put_u16::<LittleEndian>(target_info_size as u16);
@@ -679,7 +703,10 @@ impl<'a> ToWire for ChallengeMessage<'a> {
     }
 }
 
-fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
+pub type NtResponseKey = GenericArray<u8, U16>;
+pub type LmResponseKey = GenericArray<u8, U16>;
+
+pub fn lm_owf_v1<S: AsRef<str>>(password: S) -> LmResponseKey {
     let key = password
         .as_ref()
         .to_uppercase()
@@ -698,7 +725,7 @@ fn lm_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
         Des::new(&make_key(GenericArray::from_slice(key))).encrypt_block(GenericArray::from_mut_slice(buf));
     }
 
-    GenericArray::from_iter(buf.into_iter())
+    LmResponseKey::from_iter(buf.into_iter())
 }
 
 fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
@@ -714,30 +741,31 @@ fn make_key(key7: &GenericArray<u8, U7>) -> GenericArray<u8, U8> {
     ])
 }
 
-fn nt_owf_v1<S: AsRef<str>>(password: S) -> GenericArray<u8, U16> {
-    GenericArray::from_iter(Md4::digest(&utf16(password)))
+pub fn nt_owf_v1<S: AsRef<str>>(password: S) -> NtResponseKey {
+    NtResponseKey::from_iter(Md4::digest(&utf16(password)))
 }
 
-fn lm_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+pub fn lm_owf_v2<S: AsRef<str>>(username: S, password: S, domain: S) -> LmResponseKey {
     nt_owf_v2(username, password, domain)
 }
 
-fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: Option<S>) -> GenericArray<u8, U16> {
+pub fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: S) -> NtResponseKey {
     let key = nt_owf_v1(password);
 
     hmac_md5(
         &key,
         &[
             &utf16(username.as_ref().to_uppercase()),
-            &utf16(domain.as_ref().map(|s| s.as_ref()).unwrap_or_default()),
+            &utf16(domain.as_ref()),
         ],
     )
 }
 
 /// Indicates the encryption of an 8-byte data item D with the 16-byte key K
 /// using the Data Encryption Standard Long (DESL) algorithm.
-fn desl(key: GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
-    let key = key.into_iter()
+fn desl(key: &GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
+    let key = key.iter()
+        .cloned()
         .chain(iter::repeat(0))
         .take(21)
         .collect::<Vec<u8>>();
@@ -771,7 +799,7 @@ pub fn rc4(key: &GenericArray<u8, U16>, data: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 pub fn hmac_md5(key: &GenericArray<u8, U16>, data: &[&[u8]]) -> GenericArray<u8, U16> {
-    let mut hmac = Hmac::new(Md5::new(), &key);
+    let mut hmac = Hmac::new(Md5::new(), key);
 
     for b in data {
         hmac.input(b);
@@ -793,37 +821,32 @@ pub fn generate_random_session_key() -> SessionKey {
     SessionKey::from_iter(thread_rng().gen_iter().take(16))
 }
 
-pub fn generate_session_base_key_v1<S: AsRef<str>>(password: S) -> SessionKey {
-    SessionKey::from_iter(Md4::digest(&nt_owf_v1(password)))
+pub fn generate_session_base_key_v1(nt_response_key: &NtResponseKey) -> SessionKey {
+    SessionKey::from_iter(Md4::digest(nt_response_key))
 }
 
-pub fn generate_session_base_key_v2<S: AsRef<str>>(
-    username: S,
-    password: S,
-    domain: Option<S>,
+pub fn generate_session_base_key_v2(
+    nt_response_key: &NtResponseKey,
     nt_proof_str: &GenericArray<u8, U16>,
 ) -> SessionKey {
-    let nt_response_key = nt_owf_v2(username, password, domain);
-
-    hmac_md5(&nt_response_key, &[nt_proof_str])
+    hmac_md5(nt_response_key, &[nt_proof_str])
 }
 
 pub type KeyExchangeKey = GenericArray<u8, U16>;
 
-pub fn generate_key_exchange_key<S: AsRef<str>>(
+pub fn generate_key_exchange_key(
     flags: NegotiateFlags,
-    password: S,
+    lm_response_key: &LmResponseKey,
     session_base_key: &SessionKey,
     server_challenge: &ServerChallenge,
     lm_challenge_response: &GenericArray<u8, U8>,
 ) -> KeyExchangeKey {
-    let lmowf = lm_owf_v1(password);
-
     if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY) {
         hmac_md5(session_base_key, &[server_challenge, lm_challenge_response])
     } else if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_LM_KEY) {
-        let key = lmowf
-            .into_iter()
+        let key = lm_response_key
+            .iter()
+            .cloned()
             .take(8)
             .chain(iter::repeat(0xBD))
             .take(14)
@@ -840,9 +863,16 @@ pub fn generate_key_exchange_key<S: AsRef<str>>(
 
         KeyExchangeKey::from_iter(buf.into_iter())
     } else if flags.contains(NegotiateFlags::NTLMSSP_REQUEST_NON_NT_SESSION_KEY) {
-        KeyExchangeKey::from_iter(lmowf.into_iter().take(8).chain(iter::repeat(0)).take(16))
+        KeyExchangeKey::from_iter(
+            lm_response_key
+                .iter()
+                .cloned()
+                .take(8)
+                .chain(iter::repeat(0))
+                .take(16),
+        )
     } else {
-        session_base_key.clone()
+        *session_base_key
     }
 }
 
@@ -922,7 +952,7 @@ pub fn generate_seal_key(
                 .chain(vec![0xE5, 0x38, 0xB0].into_iter())
         })
     } else {
-        exported_session_key.clone()
+        *exported_session_key
     }
 }
 
@@ -938,47 +968,35 @@ pub enum LmChallengeResponse<'a> {
 }
 
 impl<'a> LmChallengeResponse<'a> {
-    pub fn v1(password: &str, server_challenge: &GenericArray<u8, U8>) -> Option<LmChallengeResponse<'a>> {
-        if password.is_empty() {
-            None
-        } else {
-            let lm_response_key = lm_owf_v1(password);
-            let lm_response_data = desl(lm_response_key, server_challenge);
+    pub fn v1(lm_response_key: &LmResponseKey, server_challenge: &ServerChallenge) -> LmChallengeResponse<'a> {
+        let lm_response_data = desl(lm_response_key, server_challenge);
 
-            Some(LmChallengeResponse::V1 {
-                response: lm_response_data.to_vec().into(),
-            })
+        LmChallengeResponse::V1 {
+            response: lm_response_data.to_vec().into(),
         }
     }
 
-    pub fn with_extended_session_security(client_challenge: &GenericArray<u8, U8>) -> Option<LmChallengeResponse<'a>> {
+    pub fn with_extended_session_security(client_challenge: &ClientChallenge) -> LmChallengeResponse<'a> {
         let mut lm_response_data = vec![];
 
         lm_response_data.extend_from_slice(client_challenge);
         lm_response_data.extend(iter::repeat(0).take(16));
 
-        Some(LmChallengeResponse::V1 {
+        LmChallengeResponse::V1 {
             response: lm_response_data.into(),
-        })
+        }
     }
 
     pub fn v2(
-        username: &str,
-        password: &str,
-        domain: Option<&str>,
-        server_challenge: &GenericArray<u8, U8>,
-        client_challenge: &GenericArray<u8, U8>,
-    ) -> Option<LmChallengeResponse<'a>> {
-        if username.is_empty() || password.is_empty() || domain.is_none() {
-            None
-        } else {
-            let lm_response_key = lm_owf_v2(username, password, domain);
-            let lm_response_data = hmac_md5(&lm_response_key, &[server_challenge, client_challenge]);
+        lm_response_key: &LmResponseKey,
+        server_challenge: &ServerChallenge,
+        client_challenge: &ClientChallenge,
+    ) -> LmChallengeResponse<'a> {
+        let lm_response_data = hmac_md5(lm_response_key, &[server_challenge, client_challenge]);
 
-            Some(LmChallengeResponse::V2 {
-                response: lm_response_data.to_vec().into(),
-                challenge: client_challenge.to_vec().into(),
-            })
+        LmChallengeResponse::V2 {
+            response: lm_response_data.to_vec().into(),
+            challenge: client_challenge.to_vec().into(),
         }
     }
 
@@ -1040,73 +1058,55 @@ pub enum NtChallengeResponse<'a> {
 }
 
 impl<'a> NtChallengeResponse<'a> {
-    pub fn v1(password: &str, server_challenge: &GenericArray<u8, U8>) -> Option<NtChallengeResponse<'a>> {
-        if password.is_empty() {
-            None
-        } else {
-            let nt_response_key = nt_owf_v1(password);
-            let nt_response_data = desl(nt_response_key, server_challenge);
+    pub fn v1(nt_response_key: &NtResponseKey, server_challenge: &ServerChallenge) -> NtChallengeResponse<'a> {
+        let nt_response_data = desl(nt_response_key, server_challenge);
 
-            Some(NtChallengeResponse::V1 {
-                response: nt_response_data.to_vec().into(),
-            })
+        NtChallengeResponse::V1 {
+            response: nt_response_data.to_vec().into(),
         }
     }
 
     pub fn with_extended_session_security(
-        password: &str,
-        server_challenge: &GenericArray<u8, U8>,
-        client_challenge: &GenericArray<u8, U8>,
-    ) -> Option<NtChallengeResponse<'a>> {
-        if password.is_empty() {
-            None
-        } else {
-            let nt_response_key = nt_owf_v1(password);
+        nt_response_key: &NtResponseKey,
+        server_challenge: &ServerChallenge,
+        client_challenge: &ClientChallenge,
+    ) -> NtChallengeResponse<'a> {
+        let mut md5 = Md5::new();
+        md5.input(server_challenge);
+        md5.input(client_challenge);
 
-            let mut md5 = Md5::new();
-            md5.input(server_challenge);
-            md5.input(client_challenge);
+        let mut hash = vec![0u8; 16];
+        md5.result(&mut hash);
 
-            let mut hash = vec![0u8; 16];
-            md5.result(&mut hash);
+        let nt_response_data = desl(nt_response_key, GenericArray::from_slice(&hash[..8]));
 
-            let nt_response_data = desl(nt_response_key, GenericArray::from_slice(&hash[..8]));
-
-            Some(NtChallengeResponse::V1 {
-                response: nt_response_data.to_vec().into(),
-            })
+        NtChallengeResponse::V1 {
+            response: nt_response_data.to_vec().into(),
         }
     }
 
     pub fn v2(
-        username: &str,
-        password: &str,
-        domain: Option<&str>,
-        server_challenge: &GenericArray<u8, U8>,
-        client_challenge: &GenericArray<u8, U8>,
+        nt_response_key: &NtResponseKey,
+        server_challenge: &ServerChallenge,
+        client_challenge: &ClientChallenge,
         current_time: FileTime,
-        context: Vec<AvPair<'a>>,
-    ) -> Option<NtChallengeResponse<'a>> {
-        if username.is_empty() || password.is_empty() || domain.is_none() {
-            None
-        } else {
-            let nt_response_key = nt_owf_v2(username, password, domain);
-            let mut client_data = vec![];
+        target_info: Vec<AvPair<'a>>,
+    ) -> NtChallengeResponse<'a> {
+        let mut client_data = vec![];
 
-            let client_challenge = NtlmClientChalenge {
-                timestamp: current_time.into(),
-                challenge: client_challenge.to_vec().into(),
-                context,
-            };
+        let client_challenge = NtlmClientChalenge {
+            timestamp: current_time.into(),
+            challenge_from_client: client_challenge.to_vec().into(),
+            target_info,
+        };
 
-            client_challenge.to_wire(&mut client_data).unwrap();
+        client_challenge.to_wire(&mut client_data).unwrap();
 
-            let nt_proof_str = hmac_md5(&nt_response_key, &[server_challenge, &client_data]);
+        let nt_proof_str = hmac_md5(nt_response_key, &[server_challenge, &client_data]);
 
-            Some(NtChallengeResponse::V2 {
-                response: nt_proof_str.to_vec().into(),
-                challenge: client_challenge,
-            })
+        NtChallengeResponse::V2 {
+            response: nt_proof_str.to_vec().into(),
+            challenge: client_challenge,
         }
     }
 
@@ -1159,18 +1159,18 @@ impl<'a> ToWire for NtChallengeResponse<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NtlmClientChalenge<'a> {
-    timestamp: u64,
-    challenge: Cow<'a, [u8]>,
-    context: Vec<AvPair<'a>>,
+    pub timestamp: u64,
+    pub challenge_from_client: Cow<'a, [u8]>,
+    pub target_info: Vec<AvPair<'a>>,
 }
 
 impl<'a> NtlmClientChalenge<'a> {
     pub fn size(&self) -> usize {
-        kNtlmClientChalengeHeaderSize + kTimestampSize + self.challenge.len() + 8
-            + self.context
+        kNtlmClientChalengeHeaderSize + kTimestampSize + self.challenge_from_client.len() + 8
+            + self.target_info
                 .iter()
                 .map(|av_pair| av_pair.size())
-                .sum::<usize>() + match self.context.last() {
+                .sum::<usize>() + match self.target_info.last() {
             Some(av_pair) if av_pair.id == AvId::EOL => 0,
             _ => eol().size(),
         }
@@ -1184,14 +1184,14 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
         buf.put_u16::<LittleEndian>(0); // Reserved1
         buf.put_u32::<LittleEndian>(0); // Reserved2
         buf.put_u64::<LittleEndian>(self.timestamp);
-        buf.put_slice(self.challenge.as_ref());
+        buf.put_slice(self.challenge_from_client.as_ref());
         buf.put_u32::<LittleEndian>(0); // Reserved3
 
-        for av_pair in &self.context {
+        for av_pair in &self.target_info {
             av_pair.to_wire(buf)?;
         }
 
-        match self.context.last() {
+        match self.target_info.last() {
             Some(av_pair) if av_pair.id == AvId::EOL => {}
             _ => {
                 eol().to_wire(buf)?;
@@ -1201,6 +1201,47 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
         buf.put_u32::<LittleEndian>(0); // Reserved4
 
         Ok(self.size())
+    }
+}
+
+pub fn compute_response<'a>(
+    flags: NegotiateFlags,
+    nt_response_key: &NtResponseKey,
+    lm_response_key: &LmResponseKey,
+    server_challenge: &ServerChallenge,
+    client_challenge: &ClientChallenge,
+    current_time: FileTime,
+    target_info: Vec<AvPair<'a>>,
+) -> (NtChallengeResponse<'a>, LmChallengeResponse<'a>, SessionKey) {
+    if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY) {
+        (
+            NtChallengeResponse::with_extended_session_security(nt_response_key, server_challenge, client_challenge),
+            LmChallengeResponse::with_extended_session_security(client_challenge),
+            generate_session_base_key_v1(nt_response_key),
+        )
+    } else if flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
+        (
+            NtChallengeResponse::v1(nt_response_key, server_challenge),
+            LmChallengeResponse::v1(lm_response_key, server_challenge),
+            generate_session_base_key_v1(nt_response_key),
+        )
+    } else {
+        let nt_response = NtChallengeResponse::v2(
+            nt_response_key,
+            server_challenge,
+            client_challenge,
+            current_time,
+            target_info,
+        );
+        let lm_response = LmChallengeResponse::v2(lm_response_key, server_challenge, client_challenge);
+        let nt_proof_str = nt_response.response();
+        let nt_proof_str = GenericArray::from_slice(nt_proof_str.as_ref());
+
+        (
+            nt_response,
+            lm_response,
+            generate_session_base_key_v2(nt_response_key, nt_proof_str),
+        )
     }
 }
 
@@ -1288,9 +1329,7 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
                     && session_key_field.length > 0
                 {
-                    msg.session_key = Some(Cow::from(
-                        session_key_field.extract_data(remaining, offset)?,
-                    ))
+                    msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
                 }
 
                 Ok(msg)
@@ -1378,6 +1417,7 @@ const kAvIdSize: usize = 2;
 const kAvLenSize: usize = 2;
 const kNtlmClientChalengeHeaderSize: usize = 8;
 const kTimestampSize: usize = 8;
+const kFileTimeSize: usize = 8;
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(
@@ -1569,15 +1609,22 @@ named!(
     )
 );
 
+#[cfg_attr(rustfmt, rustfmt_skip)]
 named!(
     parse_ntlm_client_challenge<NtlmClientChalenge>,
     do_parse!(
-        _resp_type: verify!(call!(nom::le_u8), |v| v == 1) >> _hi_resp_type: verify!(call!(nom::le_u8), |v| v == 1)
-            >> _reserved1: take!(2) >> _reserved2: take!(4) >> timestamp: call!(nom::le_u64)
-            >> challenge: take!(8) >> _reserved3: take!(4) >> context: parse_av_pairs >> (NtlmClientChalenge {
+        _resp_type: verify!(call!(nom::le_u8), |v| v == 1) >>
+        _hi_resp_type: verify!(call!(nom::le_u8), |v| v == 1) >>
+        _reserved1: take!(2) >>
+        _reserved2: take!(4) >>
+        timestamp: call!(nom::le_u64) >>
+        challenge_from_client: map!(take!(8), Cow::from) >>
+        _reserved3: take!(4) >>
+        target_info: parse_av_pairs >>
+        (NtlmClientChalenge {
             timestamp,
-            challenge: challenge.into(),
-            context,
+            challenge_from_client,
+            target_info,
         })
     )
 );
@@ -1698,7 +1745,7 @@ mod tests {
     const kWorkstation: &str = "COMPUTER";
 
     lazy_static! {
-        static ref kRandomSessionKey: GenericArray<u8, U16> = GenericArray::from_iter(iter::repeat(0x55).take(16));
+        static ref kRandomSessionKey: SessionKey = SessionKey::from_iter(iter::repeat(0x55).take(16));
         static ref kTime: FileTime = FileTime::from(0);
         static ref kChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_56
@@ -1721,10 +1768,10 @@ mod tests {
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
                                                     | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
-        static ref kClientChallenge: GenericArray<u8, U8> = arr![u8; 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
-        static ref kServerChallenge: GenericArray<u8, U8> = arr![u8; 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
-        static ref kSessionBaseKey: GenericArray<u8, U16> = arr![u8; 0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb,
-                                                                     0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84];
+        static ref kClientChallenge: ClientChallenge = arr![u8; 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
+        static ref kServerChallenge: ServerChallenge = arr![u8; 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        static ref kSessionBaseKey: SessionKey = arr![u8; 0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb,
+                                                          0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84];
         static ref  kNtChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
             0x67, 0xc4, 0x30, 0x11, 0xf3, 0x02, 0x98, 0xa2, 0xad, 0x35, 0xec, 0xe6, 0x4f, 0x16, 0x33, 0x1c, 0x44, 0xbd,
             0xbe, 0xd9, 0x27, 0x84, 0x1f, 0x94
@@ -1754,34 +1801,39 @@ mod tests {
             ][..]
         );
 
+        let nt_response_key = nt_owf_v1(kPassword);
+
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            generate_session_base_key_v1(kPassword),
+            generate_session_base_key_v1(&nt_response_key),
             *kSessionBaseKey
         );
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            NtChallengeResponse::v1(&kPassword, &*kServerChallenge),
-            Some(NtChallengeResponse::V1 {
+            NtChallengeResponse::v1(&nt_response_key, &*kServerChallenge),
+            NtChallengeResponse::V1 {
                 response: kNtChallengeResponseV1.as_slice().into(),
-            })
+            }
         );
+
+        let lm_response_key = lm_owf_v1(kPassword);
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            LmChallengeResponse::v1(&kPassword, &*kServerChallenge),
-            Some(LmChallengeResponse::V1 {
+            LmChallengeResponse::v1(&lm_response_key, &*kServerChallenge),
+            LmChallengeResponse::V1 {
                 response: kLmChallengeResponseV1.as_slice().into(),
-            })
+            }
         );
     }
 
     #[test]
     fn key_exchange_key() {
+        let lm_response_key = lm_owf_v1(kPassword);
         let key = generate_key_exchange_key(
             *kChallengeFlags,
-            kPassword,
+            &lm_response_key,
             &*kSessionBaseKey,
             &*kServerChallenge,
             GenericArray::from_slice(&kLmChallengeResponseV1.as_slice()[..8]),
@@ -1799,9 +1851,10 @@ mod tests {
 
     #[test]
     fn key_exchange_key_with_lm_key() {
+        let lm_response_key = lm_owf_v1(kPassword);
         let key = generate_key_exchange_key(
             *kChallengeFlags | NegotiateFlags::NTLMSSP_NEGOTIATE_LM_KEY,
-            kPassword,
+            &lm_response_key,
             &*kSessionBaseKey,
             &*kServerChallenge,
             GenericArray::from_slice(&kLmChallengeResponseV1.as_slice()[..8]),
@@ -1828,9 +1881,10 @@ mod tests {
 
     #[test]
     fn key_exchange_key_with_request_non_nt_session_key() {
+        let lm_response_key = lm_owf_v1(kPassword);
         let key = generate_key_exchange_key(
             *kChallengeFlags | NegotiateFlags::NTLMSSP_REQUEST_NON_NT_SESSION_KEY,
-            kPassword,
+            &lm_response_key,
             &*kSessionBaseKey,
             &*kServerChallenge,
             GenericArray::from_slice(&kLmChallengeResponseV1.as_slice()[..8]),
@@ -1852,9 +1906,10 @@ mod tests {
 
         lm_challenge_response.append(&mut vec![0u8; 16]);
 
+        let lm_response_key = lm_owf_v1(kPassword);
         let key_exchange_key = generate_key_exchange_key(
             *kClientChallengeFlags,
-            kPassword,
+            &lm_response_key,
             &*kSessionBaseKey,
             &*kServerChallenge,
             GenericArray::from_slice(&lm_challenge_response[..8]),
@@ -1894,7 +1949,7 @@ mod tests {
     fn ntlm_v2_authentication() {
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            nt_owf_v2(kUsername, kPassword, Some(kDomain)).as_slice(),
+            nt_owf_v2(kUsername, kPassword, kDomain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
@@ -1902,21 +1957,21 @@ mod tests {
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         assert_eq!(
-            lm_owf_v2(kUsername, kPassword, Some(kDomain)).as_slice(),
+            lm_owf_v2(kUsername, kPassword, kDomain).as_slice(),
             &[
                 0x0c, 0x86, 0x8a, 0x40, 0x3b, 0xfd, 0x7a, 0x93, 0xa3, 0x00, 0x1e, 0xf2, 0x2e, 0xf0, 0x2e, 0x3f
             ][..]
         );
 
+        let nt_response_key = nt_owf_v2(kUsername, kPassword, kDomain);
+
         let nt_challenge_response = NtChallengeResponse::v2(
-            kUsername,
-            kPassword,
-            Some(kDomain),
+            &nt_response_key,
             &*kServerChallenge,
             &*kClientChallenge,
             *kTime,
             vec![nb_domain_name(kDomain), nb_computer_name(kServer)],
-        ).unwrap();
+        );
 
         #[cfg_attr(rustfmt, rustfmt_skip)]
         const client_challenge: &[u8] = &[
@@ -1963,22 +2018,7 @@ mod tests {
                 assert_eq!(
                     response.as_ref(),
                     &[
-                        0x68,
-                        0xcd,
-                        0x0a,
-                        0xb8,
-                        0x51,
-                        0xe5,
-                        0x1c,
-                        0x96,
-                        0xaa,
-                        0xbc,
-                        0x92,
-                        0x7b,
-                        0xeb,
-                        0xef,
-                        0x6a,
-                        0x1c
+                        0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb, 0xef, 0x6a, 0x1c
                     ][..]
                 );
 
@@ -1993,55 +2033,20 @@ mod tests {
         let nt_proof_str = GenericArray::from_slice(nt_response.as_ref());
 
         assert_eq!(
-            generate_session_base_key_v2(kUsername, kPassword, Some(kDomain), nt_proof_str).as_slice(),
+            generate_session_base_key_v2(&nt_response_key, nt_proof_str).as_slice(),
             &[
-                0x8d,
-                0xe4,
-                0x0c,
-                0xca,
-                0xdb,
-                0xc1,
-                0x4a,
-                0x82,
-                0xf1,
-                0x5c,
-                0xb0,
-                0xad,
-                0x0d,
-                0xe9,
-                0x5c,
-                0xa3
+                0x8d, 0xe4, 0x0c, 0xca, 0xdb, 0xc1, 0x4a, 0x82, 0xf1, 0x5c, 0xb0, 0xad, 0x0d, 0xe9, 0x5c, 0xa3
             ][..]
         );
 
-        let lm_challenge_response = LmChallengeResponse::v2(
-            kUsername,
-            kPassword,
-            Some(kDomain),
-            &*kServerChallenge,
-            &*kClientChallenge,
-        ).unwrap();
+        let lm_response_key = lm_owf_v2(kUsername, kPassword, kDomain);
+        let lm_response = LmChallengeResponse::v2(&lm_response_key, &*kServerChallenge, &*kClientChallenge);
 
         assert_eq!(
-            lm_challenge_response,
+            lm_response,
             LmChallengeResponse::V2 {
                 response: (&[
-                    0x86,
-                    0xc3,
-                    0x50,
-                    0x97,
-                    0xac,
-                    0x9c,
-                    0xec,
-                    0x10,
-                    0x25,
-                    0x54,
-                    0x76,
-                    0x4a,
-                    0x57,
-                    0xcc,
-                    0xcc,
-                    0x19
+                    0x86, 0xc3, 0x50, 0x97, 0xac, 0x9c, 0xec, 0x10, 0x25, 0x54, 0x76, 0x4a, 0x57, 0xcc, 0xcc, 0x19
                 ][..])
                     .into(),
                 challenge: (&[0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA][..]).into(),

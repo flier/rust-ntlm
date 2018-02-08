@@ -6,8 +6,9 @@ use time::get_time;
 use errors::NtlmError;
 use proto::{generate_challenge, generate_key_exchange_key, generate_random_session_key, generate_seal_key,
             generate_sign_key, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
-            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, SealKey, SessionKey, SignKey, Version,
-            generate_session_base_key_v1, generate_session_base_key_v2, rc4, utf16};
+            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, SealKey, ServerChallenge, SessionKey, SignKey,
+            Version, generate_session_base_key_v1, generate_session_base_key_v2, lm_owf_v1, lm_owf_v2, nt_owf_v1,
+            nt_owf_v2, rc4, utf16};
 
 #[derive(Clone, Debug, Default)]
 pub struct NtlmClient {
@@ -118,90 +119,102 @@ impl NtlmClient {
             .get(AvId::Timestamp)
             .and_then(|av_pair| av_pair.to_timestamp())
             .unwrap_or_else(|| get_time().into());
-        let server_challenge = GenericArray::from_slice(challenge_message.server_challenge.as_ref());
+        let server_challenge = ServerChallenge::from_slice(challenge_message.server_challenge.as_ref());
         let mut session_base_key = None;
 
-        let (nt_challenge_response, lm_challenge_response) = match self.security_level {
-            NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => if support_extended_session_security {
-                let client_challenge = generate_challenge();
-                let nt_challenge_response = NtChallengeResponse::with_extended_session_security(
-                    &self.password,
-                    server_challenge,
-                    &client_challenge,
-                );
-                let lm_challenge_response = LmChallengeResponse::with_extended_session_security(&client_challenge);
+        let (nt_challenge_response, lm_challenge_response) = if self.username.is_empty() || self.password.is_empty() {
+            (None, None)
+        } else {
+            match self.security_level {
+                NtlmSecurityLevel::Level0 | NtlmSecurityLevel::Level1 => {
+                    let nt_response_key = nt_owf_v1(&self.password);
+                    let lm_response_key = lm_owf_v1(&self.password);
 
-                if support_message_sign {
-                    session_base_key = Some(generate_session_base_key_v1(&self.password));
+                    if support_extended_session_security {
+                        let client_challenge = generate_challenge();
+                        let nt_challenge_response = NtChallengeResponse::with_extended_session_security(
+                            &nt_response_key,
+                            server_challenge,
+                            &client_challenge,
+                        );
+                        let lm_challenge_response =
+                            LmChallengeResponse::with_extended_session_security(&client_challenge);
+
+                        if support_message_sign {
+                            session_base_key = Some(generate_session_base_key_v1(&nt_response_key));
+                        }
+
+                        (Some(nt_challenge_response), Some(lm_challenge_response))
+                    } else {
+                        (
+                            Some(NtChallengeResponse::v1(&nt_response_key, server_challenge)),
+                            Some(LmChallengeResponse::v1(&lm_response_key, server_challenge)),
+                        )
+                    }
                 }
+                NtlmSecurityLevel::Level2 => {
+                    let nt_response_key = nt_owf_v1(&self.password);
+                    let nt_challenge_response = NtChallengeResponse::v1(&nt_response_key, server_challenge);
+                    let response = nt_challenge_response.response();
 
-                (nt_challenge_response, lm_challenge_response)
-            } else {
-                (
-                    NtChallengeResponse::v1(&self.password, server_challenge),
-                    LmChallengeResponse::v1(&self.password, server_challenge),
-                )
-            },
-            NtlmSecurityLevel::Level2 => {
-                let nt_challenge_response = NtChallengeResponse::v1(&self.password, server_challenge);
-                let response = nt_challenge_response.as_ref().unwrap().response();
-
-                (
-                    nt_challenge_response,
-                    Some(LmChallengeResponse::V1 { response }),
-                )
-            }
-            NtlmSecurityLevel::Level3 | NtlmSecurityLevel::Level4 | NtlmSecurityLevel::Level5 => {
-                if !challenge_message.contains(AvId::NbComputerName) || !challenge_message.contains(AvId::NbDomainName)
-                {
-                    bail!(NtlmError::LogonFailure);
+                    (
+                        Some(nt_challenge_response),
+                        Some(LmChallengeResponse::V1 { response }),
+                    )
                 }
+                NtlmSecurityLevel::Level3 | NtlmSecurityLevel::Level4 | NtlmSecurityLevel::Level5 => {
+                    if !challenge_message.contains(AvId::NbComputerName)
+                        || !challenge_message.contains(AvId::NbDomainName)
+                    {
+                        bail!(NtlmError::LogonFailure);
+                    }
 
-                let username = &self.username;
-                let password = &self.password;
-                let domain_name = self.domain_name.as_ref().map(|s| s.as_str());
+                    let username = self.username.as_str();
+                    let password = self.password.as_str();
+                    let domain = self.domain_name
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or_default();
 
-                let nt_challenge_response = NtChallengeResponse::v2(
-                    username,
-                    password,
-                    domain_name,
-                    server_challenge,
-                    &generate_challenge(),
-                    curent_time,
-                    vec![],
-                );
-                let lm_challenge_response = LmChallengeResponse::v2(
-                    username,
-                    password,
-                    domain_name,
-                    server_challenge,
-                    &generate_challenge(),
-                );
+                    let nt_response_key = nt_owf_v2(username, password, domain);
+                    let lm_response_key = lm_owf_v2(username, password, domain);
 
-                if support_message_sign {
-                    let nt_proof_str = nt_challenge_response.as_ref().unwrap().response();
+                    let nt_challenge_response = NtChallengeResponse::v2(
+                        &nt_response_key,
+                        server_challenge,
+                        &generate_challenge(),
+                        curent_time,
+                        vec![],
+                    );
+                    let lm_challenge_response =
+                        LmChallengeResponse::v2(&lm_response_key, server_challenge, &generate_challenge());
 
-                    session_base_key = Some(generate_session_base_key_v2(
-                        username,
-                        password,
-                        self.domain_name.as_ref(),
-                        GenericArray::from_slice(nt_proof_str.as_ref()),
-                    ));
+                    if support_message_sign {
+                        let nt_proof_str = nt_challenge_response.response();
+
+                        session_base_key = Some(generate_session_base_key_v2(
+                            &nt_response_key,
+                            GenericArray::from_slice(nt_proof_str.as_ref()),
+                        ));
+                    }
+
+                    (Some(nt_challenge_response), Some(lm_challenge_response))
                 }
-
-                (nt_challenge_response, lm_challenge_response)
             }
         };
 
         let mut encrypted_random_session_key = None;
 
-        let client_session = if let Some(session_base_key) = session_base_key {
+        let client_session = if let (Some(session_base_key), Some(lm_challenge_response)) =
+            (session_base_key.as_ref(), lm_challenge_response.as_ref())
+        {
+            let nt_response_key = nt_owf_v1(&self.password);
             let key_exchange_key = generate_key_exchange_key(
                 flags,
-                &self.password,
-                &session_base_key,
+                &nt_response_key,
+                session_base_key,
                 server_challenge,
-                GenericArray::from_slice(&lm_challenge_response.as_ref().unwrap().response().as_ref()[..8]),
+                GenericArray::from_slice(&lm_challenge_response.response().as_ref()[..8]),
             );
 
             let exported_session_key;
