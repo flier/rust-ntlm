@@ -19,8 +19,8 @@ use hyper::server::{const_service, Http, Request, Response, Service};
 
 use getopts::Options;
 
+use ntlm::ToWire;
 use ntlm::http::{WWWAuthenticate, NTLM};
-use ntlm::proto::ToWire;
 use ntlm::server::{NtlmServer, PasswordCredential, SimpleCredentialProvider};
 
 struct HelloWorld<'a> {

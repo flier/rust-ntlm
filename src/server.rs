@@ -12,11 +12,11 @@ use generic_array::GenericArray;
 use hostname::get_hostname;
 use time::get_time;
 
+use auth::{compute_response, generate_challenge, generate_key_exchange_key, ClientChallenge, LmResponseKey,
+           NtChallengeResponse, NtResponseKey, ServerChallenge, lm_owf_v1, nt_owf_v1};
 use errors::NtlmError;
-use proto::{compute_response, dns_computer_name, dns_domain_name, dns_tree_name, generate_challenge,
-            generate_key_exchange_key, nb_computer_name, nb_domain_name, oem, timestamp, AuthenticateMessage, AvId,
-            ChallengeMessage, ClientChallenge, LmResponseKey, NegotiateFlags, NegotiateMessage, NtChallengeResponse,
-            NtResponseKey, NtlmMessage, ServerChallenge, lm_owf_v1, nt_owf_v1, utf16};
+use proto::{dns_computer_name, dns_domain_name, dns_tree_name, nb_computer_name, nb_domain_name, oem, timestamp,
+            AuthenticateMessage, AvId, ChallengeMessage, NegotiateFlags, NegotiateMessage, NtlmMessage, utf16};
 
 pub trait UserCredential {
     fn username(&self) -> &str;

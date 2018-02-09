@@ -25,9 +25,8 @@ use std::str;
 use getopts::Options;
 use hexplay::HexViewBuilder;
 
-use ntlm::NtlmError;
-use ntlm::proto::{AuthenticateMessage, ChallengeMessage, FromWire, LmChallengeResponse, NegotiateFlags,
-                  NegotiateMessage, NtChallengeResponse, NtlmMessage, from_utf16};
+use ntlm::{AuthenticateMessage, ChallengeMessage, FromWire, LmChallengeResponse, NegotiateFlags, NegotiateMessage,
+           NtChallengeResponse, NtlmError, NtlmMessage, from_utf16};
 
 enum Output {
     Stdout(io::Stdout),

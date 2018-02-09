@@ -3,12 +3,12 @@ use failure::Error;
 use generic_array::GenericArray;
 use time::get_time;
 
+use auth::{generate_challenge, generate_key_exchange_key, generate_random_session_key, generate_seal_key,
+           generate_sign_key, LmChallengeResponse, NtChallengeResponse, SealKey, ServerChallenge, SessionKey, SignKey,
+           generate_session_base_key_v1, generate_session_base_key_v2, lm_owf_v1, lm_owf_v2, nt_owf_v1, nt_owf_v2, rc4};
 use errors::NtlmError;
-use proto::{generate_challenge, generate_key_exchange_key, generate_random_session_key, generate_seal_key,
-            generate_sign_key, oem, AuthenticateMessage, AvId, ChallengeMessage, LmChallengeResponse, NegotiateFlags,
-            NegotiateMessage, NtChallengeResponse, NtlmSecurityLevel, SealKey, ServerChallenge, SessionKey, SignKey,
-            Version, generate_session_base_key_v1, generate_session_base_key_v2, lm_owf_v1, lm_owf_v2, nt_owf_v1,
-            nt_owf_v2, rc4, utf16};
+use proto::{oem, AuthenticateMessage, AvId, ChallengeMessage, NegotiateFlags, NegotiateMessage, NtlmSecurityLevel,
+            Version, utf16};
 
 #[derive(Clone, Debug, Default)]
 pub struct NtlmClient {

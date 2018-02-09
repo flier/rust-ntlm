@@ -45,12 +45,15 @@ extern crate lazy_static;
 extern crate matches;
 
 mod errors;
+mod auth;
 #[macro_use]
-pub mod proto;
+mod proto;
 pub mod server;
 pub mod client;
 
 #[cfg(feature = "hyper")]
 pub mod http;
 
-pub use errors::NtlmError;
+pub use auth::{NtChallengeResponse, LmChallengeResponse, NtlmClientChalenge};
+pub use errors::{NtlmError, ParseError};
+pub use proto::*;
