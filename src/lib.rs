@@ -46,3 +46,5 @@ pub mod client;
 
 #[cfg(feature = "hyper")]
 pub mod http;
+
+pub use errors::NtlmError;

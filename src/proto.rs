@@ -1,6 +1,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::borrow::Cow;
+use std::fmt;
 use std::io::Cursor;
 use std::iter::{self, FromIterator};
 use std::mem;
@@ -17,7 +18,7 @@ use itertools;
 use nom;
 use num::FromPrimitive;
 use rand::{thread_rng, Rng};
-use time::{get_time, Timespec};
+use time::{at_utc, get_time, Timespec};
 
 use crypto::buffer::{BufferResult, RefReadBuffer, RefWriteBuffer};
 use crypto::digest::Digest;
@@ -140,6 +141,30 @@ impl<'a> ToWire for AvPair<'a> {
     }
 }
 
+impl<'a> fmt::Display for AvPair<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.id {
+            AvId::EOL => write!(f, "EOL"),
+            AvId::NbComputerName => write!(f, "NbComputerName: {}", self.to_str().unwrap_or_default()),
+            AvId::NbDomainName => write!(f, "NbDomainName: {}", self.to_str().unwrap_or_default()),
+            AvId::DnsComputerName => write!(f, "DnsComputerName: {}", self.to_str().unwrap_or_default()),
+            AvId::DnsDomainName => write!(f, "DnsDomainName: {}", self.to_str().unwrap_or_default()),
+            AvId::DnsTreeName => write!(f, "DnsTreeName: {}", self.to_str().unwrap_or_default()),
+            AvId::Flags => write!(f, "Flags: {:?}", self.to_flags()),
+            AvId::Timestamp => write!(
+                f,
+                "Timestamp: {}",
+                self.to_timestamp()
+                    .map(|ts| at_utc(Timespec::from(ts)).ctime().to_string())
+                    .unwrap_or_default()
+            ),
+            AvId::SingleHost => write!(f, "SingleHost: {:?}", self.to_single_host()),
+            AvId::TargetName => write!(f, "TargetName: {}", self.to_str().unwrap_or_default()),
+            AvId::ChannelBindings => write!(f, "ChannelBindings: {:?}", self.value),
+        }
+    }
+}
+
 pub fn oem<S: AsRef<str>>(s: S) -> Vec<u8> {
     s.as_ref().as_bytes().to_vec()
 }
@@ -148,6 +173,12 @@ pub fn utf16<S: AsRef<str>>(s: S) -> Vec<u8> {
     UTF_16LE_ENCODING
         .encode(s.as_ref(), EncoderTrap::Ignore)
         .unwrap()
+}
+
+pub fn from_utf16<B: AsRef<[u8]>>(buf: B) -> Result<String, Error> {
+    UTF_16LE_ENCODING
+        .decode(buf.as_ref(), DecoderTrap::Ignore)
+        .map_err(|_| NtlmError::Utf16Error.into())
 }
 
 pub fn eol<'a>() -> AvPair<'a> {
@@ -420,6 +451,31 @@ pub enum NtlmMessage<'a> {
     Authenticate(AuthenticateMessage<'a>),
 }
 
+impl<'a> FromWire<'a> for NtlmMessage<'a> {
+    type Type = NtlmMessage<'a>;
+
+    fn from_wire(payload: &'a [u8]) -> Result<Self::Type, Error> {
+        if payload.len() < kSignatureSize + kMesssageTypeSize {
+            bail!(NtlmError::IncompleteMessage(nom::Needed::Unknown))
+        }
+
+        let signature = &payload[..kSignatureSize];
+
+        if signature != kSignature {
+            bail!(NtlmError::MismatchedSignature)
+        }
+
+        match MessageType::from_u32(LittleEndian::read_u32(&payload[kSignatureSize..])) {
+            Some(MessageType::Negotiate) => NegotiateMessage::from_wire(payload).map(|msg| NtlmMessage::Negotiate(msg)),
+            Some(MessageType::Challenge) => ChallengeMessage::from_wire(payload).map(|msg| NtlmMessage::Challenge(msg)),
+            Some(MessageType::Authenticate) => {
+                AuthenticateMessage::from_wire(payload).map(|msg| NtlmMessage::Authenticate(msg))
+            }
+            _ => bail!(NtlmError::MismatchedMsgType),
+        }
+    }
+}
+
 impl<'a> ToWire for NtlmMessage<'a> {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         match *self {
@@ -454,6 +510,16 @@ impl ToWire for Version {
         buf.put_u8(self.revision);
 
         Ok(kVersionSize)
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.major, self.minor, self.build, self.revision
+        )
     }
 }
 
@@ -493,6 +559,13 @@ impl<'a> FromWire<'a> for NegotiateMessage<'a> {
         match parse_negotiate_message(payload) {
             nom::IResult::Done(remaining, (mut msg, domain_name_field, workstation_name_field)) => {
                 let offset = payload.len() - remaining.len();
+
+                if msg.flags
+                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                    && domain_name_field.offset as usize >= offset + kVersionSize
+                {
+                    msg.version = parse_version(remaining).to_full_result().ok();
+                }
 
                 if msg.flags
                     .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED)
@@ -604,6 +677,13 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
         match parse_challenge_message(payload) {
             nom::IResult::Done(remaining, (mut msg, target_name_field, target_info_field)) => {
                 let offset = payload.len() - remaining.len();
+
+                if msg.flags
+                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                    && target_name_field.offset as usize >= offset + kVersionSize
+                {
+                    msg.version = parse_version(remaining).to_full_result().ok();
+                }
 
                 if msg.flags.intersects(
                     NegotiateFlags::NTLMSSP_REQUEST_TARGET | NegotiateFlags::NTLMSSP_TARGET_TYPE_DOMAIN
@@ -1159,7 +1239,7 @@ impl<'a> ToWire for NtChallengeResponse<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NtlmClientChalenge<'a> {
-    pub timestamp: u64,
+    pub timestamp: FileTime,
     pub challenge_from_client: Cow<'a, [u8]>,
     pub target_info: Vec<AvPair<'a>>,
 }
@@ -1183,7 +1263,7 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
         buf.put_u8(0x01); // HiRespType
         buf.put_u16::<LittleEndian>(0); // Reserved1
         buf.put_u32::<LittleEndian>(0); // Reserved2
-        buf.put_u64::<LittleEndian>(self.timestamp);
+        buf.put_u64::<LittleEndian>(u64::from(self.timestamp));
         buf.put_slice(self.challenge_from_client.as_ref());
         buf.put_u32::<LittleEndian>(0); // Reserved3
 
@@ -1291,32 +1371,49 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
             ) => {
                 let offset = payload.len() - remaining.len();
 
+                if msg.flags
+                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                    && lm_challenge_response_field.offset as usize >= offset + kVersionSize
+                {
+                    msg.version = parse_version(remaining).to_full_result().ok();
+                }
+
                 msg.lm_challenge_response = if lm_challenge_response_field.length > 0 {
+                    debug!(
+                        "extract LM challenge response at {} with {} bytes, current offset {}",
+                        lm_challenge_response_field.offset, lm_challenge_response_field.length, offset
+                    );
+
                     let data = lm_challenge_response_field.extract_data(remaining, offset)?;
 
-                    Some(
-                        if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
-                            parse_lm_response_v1(data)
-                        } else {
-                            parse_lm_response_v2(data)
-                        }.to_full_result()
-                            .map_err(NtlmError::from)?,
-                    )
+                    Some(if msg.flags
+                        .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
+                    {
+                        parse_lm_response_v2(data)
+                    } else {
+                        parse_lm_response_v1(data)
+                    }.to_full_result()
+                        .map_err(NtlmError::from)?)
                 } else {
                     None
                 };
 
                 msg.nt_challenge_response = if nt_challenge_response_field.length > 0 {
+                    debug!(
+                        "extract LM challenge response at {} with {} bytes, current offset {}",
+                        nt_challenge_response_field.offset, nt_challenge_response_field.length, offset
+                    );
+
                     let data = nt_challenge_response_field.extract_data(remaining, offset)?;
 
-                    Some(
-                        if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM) {
-                            parse_nt_response_v1(data)
-                        } else {
-                            parse_nt_response_v2(data)
-                        }.to_full_result()
-                            .map_err(NtlmError::from)?,
-                    )
+                    Some(if msg.flags
+                        .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY)
+                    {
+                        parse_nt_response_v2(data)
+                    } else {
+                        parse_nt_response_v1(data)
+                    }.to_full_result()
+                        .map_err(NtlmError::from)?)
                 } else {
                     None
                 };
@@ -1411,6 +1508,7 @@ const kMesssageTypeSize: usize = 4;
 const kFlagsSize: usize = 4;
 const kFieldSize: usize = 8;
 const kVersionSize: usize = 8;
+const kMICSize: usize = 16;
 const kChallengeSize: usize = 8;
 const kReservedSize: usize = 8;
 const kAvIdSize: usize = 2;
@@ -1463,17 +1561,12 @@ named!(
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
         domain_name_field: call!(parse_field) >>
         workstation_name_field: call!(parse_field) >>
-        version:
-            cond!(
-                flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION),
-                call!(parse_version)
-            ) >>
         (
             NegotiateMessage {
                 flags,
                 domain_name: None,
                 workstation_name: None,
-                version,
+                version: None,
             },
             domain_name_field,
             workstation_name_field
@@ -1502,18 +1595,13 @@ named!(
         server_challenge: map!(take!(8), Cow::from) >>
         _reserved: take!(8) >>
         target_info_field: call!(parse_field) >>
-        version:
-            cond!(
-                flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION),
-                call!(parse_version)
-            ) >>
         (
             ChallengeMessage {
                 flags,
                 server_challenge,
                 target_name: None,
                 target_info: None,
-                version,
+                version: None,
             },
             target_name_field,
             target_info_field
@@ -1544,11 +1632,6 @@ named!(
         workstation_name_field: call!(parse_field) >>
         session_key_field: call!(parse_field) >>
         flags: map!(nom::le_u32, NegotiateFlags::from_bits_truncate) >>
-        version:
-            cond!(
-                flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION),
-                call!(parse_version)
-            ) >>
         (
             AuthenticateMessage {
                 lm_challenge_response: None,
@@ -1558,7 +1641,7 @@ named!(
                 workstation_name: Default::default(),
                 session_key: Default::default(),
                 flags,
-                version,
+                version: None,
                 mic: None,
             },
             lm_challenge_response_field,
@@ -1617,7 +1700,7 @@ named!(
         _hi_resp_type: verify!(call!(nom::le_u8), |v| v == 1) >>
         _reserved1: take!(2) >>
         _reserved2: take!(4) >>
-        timestamp: call!(nom::le_u64) >>
+        timestamp: map!(call!(nom::le_u64), FileTime::from) >>
         challenge_from_client: map!(take!(8), Cow::from) >>
         _reserved3: take!(4) >>
         target_info: parse_av_pairs >>
@@ -1710,10 +1793,14 @@ impl<'a> WriteField for Cow<'a, [u8]> {
     }
 }
 
+#[cfg_attr(rustfmt, rustfmt_skip)]
 named!(
     parse_field<Field>,
     do_parse!(
-        length: call!(nom::le_u16) >> capacity: call!(nom::le_u16) >> offset: call!(nom::le_u32) >> (Field {
+        length: call!(nom::le_u16) >>
+        capacity: call!(nom::le_u16) >>
+        offset: call!(nom::le_u32) >>
+        (Field {
             length,
             capacity,
             offset,
@@ -1721,11 +1808,16 @@ named!(
     )
 );
 
+#[cfg_attr(rustfmt, rustfmt_skip)]
 named!(
     parse_version<Version>,
     do_parse!(
-        major: call!(nom::le_u8) >> minor: call!(nom::le_u8) >> build: call!(nom::le_u16) >> _reserved: take!(3)
-            >> revision: call!(nom::le_u8) >> (Version {
+        major: call!(nom::le_u8) >>
+        minor: call!(nom::le_u8) >>
+        build: call!(nom::le_u16) >>
+        _reserved: take!(3) >>
+        revision: call!(nom::le_u8) >>
+        (Version {
             major,
             minor,
             build,

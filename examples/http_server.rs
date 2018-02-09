@@ -55,9 +55,10 @@ impl<'a> Service for HelloWorld<'a> {
                         Ok(_) => Box::new(futures::future::ok(
                             Response::new()
                                 .with_status(StatusCode::Unauthorized)
-                                .with_header(WWWAuthenticate(
-                                    vec!["NTLM".to_owned(), base64::encode(&buf)],
-                                )),
+                                .with_header(WWWAuthenticate(vec![
+                                    "NTLM".to_owned(),
+                                    base64::encode(&buf),
+                                ])),
                         )),
                         Err(err) => {
                             warn!("fail to write NTLM message, {}", err);

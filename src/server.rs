@@ -110,7 +110,7 @@ impl SimpleCredentialProvider<PasswordCredential> {
     pub fn add_user<S: AsRef<str>>(&mut self, username: S, password: S, domain: S) -> Option<PasswordCredential> {
         self.users.insert(
             (username.as_ref().to_owned(), domain.as_ref().to_owned()),
-            PasswordCredential::new(username, password, domain)
+            PasswordCredential::new(username, password, domain),
         )
     }
 }
@@ -337,9 +337,7 @@ impl<'a> NtlmServer<'a> {
                 authenticate_message
                     .lm_challenge_response
                     .as_ref()
-                    .map(|lm_challenge_response| {
-                        (&lm_challenge_response.response()[..8]).to_vec().into()
-                    })
+                    .map(|lm_challenge_response| (&lm_challenge_response.response()[..8]).to_vec().into())
             } else {
                 None
             };
