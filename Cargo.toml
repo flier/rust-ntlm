@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Flier Lu <flier.lu@gmail.com>"]
 
 [features]
-default = ["hyper"]
+default = ["hyper", "serde", "serde_derive"]
 
 [dependencies]
 failure = "0.1"
@@ -26,6 +26,8 @@ rand = "0.4"
 time = "0.1"
 hostname = "0.1"
 
+serde = { version = "1.0", optional = true }
+serde_derive = { version = "1.0", optional = true }
 hyper = { version = "0.11", optional = true }
 clippy = { version = "*", optional = true }
 
@@ -43,3 +45,7 @@ getopts = "0.2"
 matches = "0.1"
 hex = "0.3"
 hexplay = "0.2"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+serde_yaml = "0.7"

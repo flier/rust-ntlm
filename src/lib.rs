@@ -31,6 +31,12 @@ extern crate time;
 #[macro_use]
 extern crate hyper;
 
+#[cfg(feature = "serde")]
+extern crate serde;
+#[cfg(feature = "serde")]
+#[macro_use]
+extern crate serde_derive;
+
 #[cfg(test)]
 #[macro_use]
 extern crate lazy_static;
