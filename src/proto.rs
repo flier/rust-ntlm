@@ -471,11 +471,9 @@ impl<'a> FromWire<'a> for NtlmMessage<'a> {
         }
 
         match MessageType::from_u32(LittleEndian::read_u32(&payload[kSignatureSize..])) {
-            Some(MessageType::Negotiate) => NegotiateMessage::from_wire(payload).map(|msg| NtlmMessage::Negotiate(msg)),
-            Some(MessageType::Challenge) => ChallengeMessage::from_wire(payload).map(|msg| NtlmMessage::Challenge(msg)),
-            Some(MessageType::Authenticate) => {
-                AuthenticateMessage::from_wire(payload).map(|msg| NtlmMessage::Authenticate(msg))
-            }
+            Some(MessageType::Negotiate) => NegotiateMessage::from_wire(payload).map(NtlmMessage::Negotiate),
+            Some(MessageType::Challenge) => ChallengeMessage::from_wire(payload).map(NtlmMessage::Challenge),
+            Some(MessageType::Authenticate) => AuthenticateMessage::from_wire(payload).map(NtlmMessage::Authenticate),
             _ => bail!(NtlmError::MismatchedMsgType),
         }
     }
@@ -1185,7 +1183,7 @@ impl<'a> NtChallengeResponse<'a> {
         let mut client_data = vec![];
 
         let client_challenge = NtlmClientChalenge {
-            timestamp: current_time.into(),
+            timestamp: current_time,
             challenge_from_client: client_challenge.to_vec().into(),
             target_info,
         };
