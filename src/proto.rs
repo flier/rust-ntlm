@@ -7,8 +7,8 @@ use std::mem;
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
-use encoding::{DecoderTrap, EncoderTrap, Encoding};
 use encoding::codec::utf_16::UTF_16LE_ENCODING;
+use encoding::{DecoderTrap, EncoderTrap, Encoding};
 
 use failure::Error;
 use nom;
@@ -87,9 +87,7 @@ impl<'a> AvPair<'a> {
             | AvId::DnsComputerName
             | AvId::DnsDomainName
             | AvId::DnsTreeName
-            | AvId::TargetName => UTF_16LE_ENCODING
-                .decode(self.value.as_ref(), DecoderTrap::Ignore)
-                .ok(),
+            | AvId::TargetName => UTF_16LE_ENCODING.decode(self.value.as_ref(), DecoderTrap::Ignore).ok(),
             _ => None,
         }
     }
@@ -121,8 +119,8 @@ impl<'a> AvPair<'a> {
 
 impl<'a> ToWire for AvPair<'a> {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
-        buf.put_u16::<LittleEndian>(self.id as u16);
-        buf.put_u16::<LittleEndian>(self.value.as_ref().len() as u16);
+        buf.put_u16_le(self.id as u16);
+        buf.put_u16_le(self.value.as_ref().len() as u16);
         buf.put_slice(self.value.as_ref());
 
         Ok(self.size())
@@ -158,9 +156,7 @@ pub fn oem<S: AsRef<str>>(s: S) -> Vec<u8> {
 }
 
 pub fn utf16<S: AsRef<str>>(s: S) -> Vec<u8> {
-    UTF_16LE_ENCODING
-        .encode(s.as_ref(), EncoderTrap::Ignore)
-        .unwrap()
+    UTF_16LE_ENCODING.encode(s.as_ref(), EncoderTrap::Ignore).unwrap()
 }
 
 pub fn from_utf16<B: AsRef<[u8]>>(buf: B) -> Result<String, Error> {
@@ -293,16 +289,16 @@ impl<'a> FromWire<'a> for FileTime {
         let mut cur = Cursor::new(payload);
 
         Ok(FileTime {
-            lo: cur.get_u32::<LittleEndian>(),
-            hi: cur.get_u32::<LittleEndian>(),
+            lo: cur.get_u32_le(),
+            hi: cur.get_u32_le(),
         })
     }
 }
 
 impl ToWire for FileTime {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
-        buf.put_u32::<LittleEndian>(self.lo);
-        buf.put_u32::<LittleEndian>(self.hi);
+        buf.put_u32_le(self.lo);
+        buf.put_u32_le(self.hi);
 
         Ok(kFileTimeSize)
     }
@@ -495,8 +491,8 @@ impl ToWire for Version {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_u8(self.major);
         buf.put_u8(self.minor);
-        buf.put_u16::<LittleEndian>(self.build);
-        buf.put_uint::<LittleEndian>(0, 3);
+        buf.put_u16_le(self.build);
+        buf.put_uint_le(0, 3);
         buf.put_u8(self.revision);
 
         Ok(kVersionSize)
@@ -505,11 +501,7 @@ impl ToWire for Version {
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{}",
-            self.major, self.minor, self.build, self.revision
-        )
+        write!(f, "{}.{}.{}.{}", self.major, self.minor, self.build, self.revision)
     }
 }
 
@@ -551,8 +543,7 @@ impl<'a> FromWire<'a> for NegotiateMessage<'a> {
             nom::IResult::Done(remaining, (mut msg, domain_name_field, workstation_name_field)) => {
                 let offset = payload.len() - remaining.len();
 
-                if msg.flags
-                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
                     && domain_name_field.offset as usize >= offset + kVersionSize
                 {
                     msg.version = parse_version(remaining).to_full_result().ok();
@@ -589,7 +580,7 @@ impl<'a> ToWire for NegotiateMessage<'a> {
         };
 
         buf.put_slice(kSignature);
-        buf.put_u32::<LittleEndian>(MessageType::Negotiate as u32);
+        buf.put_u32_le(MessageType::Negotiate as u32);
 
         let mut flags = self.flags;
 
@@ -605,7 +596,7 @@ impl<'a> ToWire for NegotiateMessage<'a> {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION;
         }
 
-        buf.put_u32::<LittleEndian>(flags.bits());
+        buf.put_u32_le(flags.bits());
 
         offset += self.domain_name.write_field(buf, offset)?;
         offset += self.workstation_name.write_field(buf, offset)?;
@@ -670,8 +661,7 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
             nom::IResult::Done(remaining, (mut msg, target_name_field, target_info_field)) => {
                 let offset = payload.len() - remaining.len();
 
-                if msg.flags
-                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
                     && target_name_field.offset as usize >= offset + kVersionSize
                 {
                     msg.version = parse_version(remaining).to_full_result().ok();
@@ -685,14 +675,10 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
                     msg.target_name = Some(Cow::from(target_name_field.extract_data(remaining, offset)?));
                 }
 
-                if msg.flags
-                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO)
-                {
+                if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_TARGET_INFO) {
                     let target_info = target_info_field.extract_data(remaining, offset)?;
 
-                    msg.target_info = Some(parse_av_pairs(target_info)
-                        .to_full_result()
-                        .map_err(NtlmError::from)?);
+                    msg.target_info = Some(parse_av_pairs(target_info).to_full_result().map_err(NtlmError::from)?);
                 }
 
                 Ok(msg)
@@ -706,14 +692,10 @@ impl<'a> FromWire<'a> for ChallengeMessage<'a> {
 impl<'a> ToWire for ChallengeMessage<'a> {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         let mut offset = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 2 + kChallengeSize
-            + kReservedSize + if self.version.is_some() {
-            kVersionSize
-        } else {
-            0
-        };
+            + kReservedSize + if self.version.is_some() { kVersionSize } else { 0 };
 
         buf.put_slice(kSignature);
-        buf.put_u32::<LittleEndian>(MessageType::Challenge as u32);
+        buf.put_u32_le(MessageType::Challenge as u32);
 
         offset += self.target_name.write_field(buf, offset)?;
 
@@ -735,10 +717,10 @@ impl<'a> ToWire for ChallengeMessage<'a> {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION;
         }
 
-        buf.put_u32::<LittleEndian>(flags.bits());
+        buf.put_u32_le(flags.bits());
 
         buf.put_slice(self.server_challenge.as_ref());
-        buf.put_u64::<LittleEndian>(0); // Reserved
+        buf.put_u64_le(0); // Reserved
 
         if let Some(ref target_info) = self.target_info {
             let target_info_size = target_info
@@ -746,15 +728,15 @@ impl<'a> ToWire for ChallengeMessage<'a> {
                 .map(|av_pair| kAvIdSize + kAvLenSize + av_pair.value.as_ref().len())
                 .sum::<usize>();
 
-            buf.put_u16::<LittleEndian>(target_info_size as u16);
-            buf.put_u16::<LittleEndian>(target_info_size as u16);
-            buf.put_u32::<LittleEndian>(offset as u32);
+            buf.put_u16_le(target_info_size as u16);
+            buf.put_u16_le(target_info_size as u16);
+            buf.put_u32_le(offset as u32);
 
             offset += target_info_size;
         } else {
-            buf.put_u16::<LittleEndian>(0);
-            buf.put_u16::<LittleEndian>(0);
-            buf.put_u32::<LittleEndian>(offset as u32);
+            buf.put_u16_le(0);
+            buf.put_u16_le(0);
+            buf.put_u32_le(offset as u32);
         }
 
         if let Some(ref version) = self.version {
@@ -822,8 +804,7 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
             ) => {
                 let offset = payload.len() - remaining.len();
 
-                if msg.flags
-                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
+                if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION)
                     && lm_challenge_response_field.offset as usize >= offset + kVersionSize
                 {
                     msg.version = parse_version(remaining).to_full_result().ok();
@@ -873,10 +854,7 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
                 msg.user_name = Cow::from(user_name_field.extract_data(remaining, offset)?);
                 msg.workstation_name = Cow::from(workstation_name_field.extract_data(remaining, offset)?);
 
-                if msg.flags
-                    .contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH)
-                    && session_key_field.length > 0
-                {
+                if msg.flags.contains(NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH) && session_key_field.length > 0 {
                     msg.session_key = Some(Cow::from(session_key_field.extract_data(remaining, offset)?))
                 }
 
@@ -891,23 +869,17 @@ impl<'a> FromWire<'a> for AuthenticateMessage<'a> {
 impl<'a> ToWire for AuthenticateMessage<'a> {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         let header_size = kSignatureSize + kMesssageTypeSize + kFlagsSize + kFieldSize * 6
-            + if self.version.is_some() {
-                kVersionSize
-            } else {
-                0
-            };
+            + if self.version.is_some() { kVersionSize } else { 0 };
 
         buf.put_slice(kSignature);
-        buf.put_u32::<LittleEndian>(MessageType::Authenticate as u32);
+        buf.put_u32_le(MessageType::Authenticate as u32);
 
         let mut offset = header_size;
         let mut response_offset =
             header_size + self.domain_name.len() + self.user_name.len() + self.workstation_name.len();
 
-        response_offset += self.lm_challenge_response
-            .write_field(buf, response_offset)?;
-        response_offset += self.nt_challenge_response
-            .write_field(buf, response_offset)?;
+        response_offset += self.lm_challenge_response.write_field(buf, response_offset)?;
+        response_offset += self.nt_challenge_response.write_field(buf, response_offset)?;
 
         offset += self.domain_name.write_field(buf, offset)?;
         offset += self.user_name.write_field(buf, offset)?;
@@ -930,7 +902,7 @@ impl<'a> ToWire for AuthenticateMessage<'a> {
             flags |= NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION;
         }
 
-        buf.put_u32::<LittleEndian>(flags.bits());
+        buf.put_u32_le(flags.bits());
 
         if let Some(ref version) = self.version {
             version.to_wire(buf)?;
@@ -1221,9 +1193,9 @@ impl<T: WriteField> WriteField for Option<T> {
         if let Some(ref data) = *self {
             data.write_field(buf, offset)
         } else {
-            buf.put_u16::<LittleEndian>(0);
-            buf.put_u16::<LittleEndian>(0);
-            buf.put_u32::<LittleEndian>(offset as u32);
+            buf.put_u16_le(0);
+            buf.put_u16_le(0);
+            buf.put_u32_le(offset as u32);
 
             Ok(0)
         }
@@ -1234,9 +1206,9 @@ impl<'a> WriteField for Cow<'a, [u8]> {
     fn write_field<B: BufMut>(&self, buf: &mut B, offset: usize) -> Result<usize, Error> {
         let data_size = self.as_ref().len();
 
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u32::<LittleEndian>(offset as u32);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u32_le(offset as u32);
 
         Ok(data_size)
     }

@@ -3,13 +3,13 @@
 use std::borrow::Cow;
 use std::iter::{self, FromIterator};
 
-use byteorder::LittleEndian;
 use bytes::BufMut;
 
 use failure::Error;
-use generic_array::GenericArray;
 use generic_array::typenum::{U16, U24, U7, U8};
+use generic_array::GenericArray;
 use itertools;
+use rand::distributions::Standard;
 use rand::{thread_rng, Rng};
 
 use crypto::buffer::{BufferResult, RefReadBuffer, RefWriteBuffer};
@@ -23,7 +23,7 @@ use des::{BlockCipher, Des};
 use md4::{Digest as MD4Digest, Md4};
 
 use errors::NtlmError;
-use proto::{eol, AvId, AvPair, FileTime, NTLMSSP_REVISION_W2K3, NegotiateFlags, ToWire, WriteField, utf16};
+use proto::{eol, utf16, AvId, AvPair, FileTime, NTLMSSP_REVISION_W2K3, NegotiateFlags, ToWire, WriteField};
 
 pub type NtResponseKey = GenericArray<u8, U16>;
 pub type LmResponseKey = GenericArray<u8, U16>;
@@ -76,21 +76,14 @@ pub fn nt_owf_v2<S: AsRef<str>>(username: S, password: S, domain: S) -> NtRespon
 
     hmac_md5(
         &key,
-        &[
-            &utf16(username.as_ref().to_uppercase()),
-            &utf16(domain.as_ref()),
-        ],
+        &[&utf16(username.as_ref().to_uppercase()), &utf16(domain.as_ref())],
     )
 }
 
 /// Indicates the encryption of an 8-byte data item D with the 16-byte key K
 /// using the Data Encryption Standard Long (DESL) algorithm.
 fn desl(key: &GenericArray<u8, U16>, data: &GenericArray<u8, U8>) -> GenericArray<u8, U24> {
-    let key = key.iter()
-        .cloned()
-        .chain(iter::repeat(0))
-        .take(21)
-        .collect::<Vec<u8>>();
+    let key = key.iter().cloned().chain(iter::repeat(0)).take(21).collect::<Vec<u8>>();
 
     let mut buf = itertools::repeat_n(&data, 3)
         .flat_map(|data| data.iter())
@@ -108,11 +101,7 @@ pub fn rc4(key: &GenericArray<u8, U16>, data: &[u8]) -> Result<Vec<u8>, Error> {
     let mut buf = vec![0; data.len()];
 
     match Rc4::new(key)
-        .encrypt(
-            &mut RefReadBuffer::new(data),
-            &mut RefWriteBuffer::new(&mut buf),
-            true,
-        )
+        .encrypt(&mut RefReadBuffer::new(data), &mut RefWriteBuffer::new(&mut buf), true)
         .map_err(NtlmError::from)?
     {
         BufferResult::BufferUnderflow => Ok(buf),
@@ -134,13 +123,13 @@ pub type ServerChallenge = GenericArray<u8, U8>;
 pub type ClientChallenge = GenericArray<u8, U8>;
 
 pub fn generate_challenge() -> GenericArray<u8, U8> {
-    GenericArray::from_iter(thread_rng().gen_iter().take(8))
+    GenericArray::from_iter(thread_rng().sample_iter(&Standard).take(8))
 }
 
 pub type SessionKey = GenericArray<u8, U16>;
 
 pub fn generate_random_session_key() -> SessionKey {
-    SessionKey::from_iter(thread_rng().gen_iter().take(16))
+    SessionKey::from_iter(thread_rng().sample_iter(&Standard).take(16))
 }
 
 pub fn generate_session_base_key_v1(nt_response_key: &NtResponseKey) -> SessionKey {
@@ -185,14 +174,7 @@ pub fn generate_key_exchange_key(
 
         KeyExchangeKey::from_iter(buf.into_iter())
     } else if flags.contains(NegotiateFlags::NTLMSSP_REQUEST_NON_NT_SESSION_KEY) {
-        KeyExchangeKey::from_iter(
-            lm_response_key
-                .iter()
-                .cloned()
-                .take(8)
-                .chain(iter::repeat(0))
-                .take(16),
-        )
+        KeyExchangeKey::from_iter(lm_response_key.iter().cloned().take(8).chain(iter::repeat(0)).take(16))
     } else {
         *session_base_key
     }
@@ -340,9 +322,9 @@ impl<'a> WriteField for LmChallengeResponse<'a> {
             } => response.len() + challenge.len(),
         };
 
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u32::<LittleEndian>(offset as u32);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u32_le(offset as u32);
 
         Ok(data_size)
     }
@@ -451,9 +433,9 @@ impl<'a> WriteField for NtChallengeResponse<'a> {
             } => response.len() + challenge.size(),
         };
 
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u16::<LittleEndian>(data_size as u16);
-        buf.put_u32::<LittleEndian>(offset as u32);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u16_le(data_size as u16);
+        buf.put_u32_le(offset as u32);
 
         Ok(data_size)
     }
@@ -495,13 +477,11 @@ pub struct NtlmClientChalenge<'a> {
 impl<'a> NtlmClientChalenge<'a> {
     pub fn size(&self) -> usize {
         kNtlmClientChalengeHeaderSize + kTimestampSize + self.challenge_from_client.len() + 8
-            + self.target_info
-                .iter()
-                .map(|av_pair| av_pair.size())
-                .sum::<usize>() + match self.target_info.last() {
-            Some(av_pair) if av_pair.id == AvId::EOL => 0,
-            _ => eol().size(),
-        }
+            + self.target_info.iter().map(|av_pair| av_pair.size()).sum::<usize>()
+            + match self.target_info.last() {
+                Some(av_pair) if av_pair.id == AvId::EOL => 0,
+                _ => eol().size(),
+            }
     }
 }
 
@@ -509,11 +489,11 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
     fn to_wire<B: BufMut>(&self, buf: &mut B) -> Result<usize, Error> {
         buf.put_u8(0x01); // RespType
         buf.put_u8(0x01); // HiRespType
-        buf.put_u16::<LittleEndian>(0); // Reserved1
-        buf.put_u32::<LittleEndian>(0); // Reserved2
-        buf.put_u64::<LittleEndian>(u64::from(self.timestamp));
+        buf.put_u16_le(0); // Reserved1
+        buf.put_u32_le(0); // Reserved2
+        buf.put_u64_le(u64::from(self.timestamp));
         buf.put_slice(self.challenge_from_client.as_ref());
-        buf.put_u32::<LittleEndian>(0); // Reserved3
+        buf.put_u32_le(0); // Reserved3
 
         for av_pair in &self.target_info {
             av_pair.to_wire(buf)?;
@@ -526,7 +506,7 @@ impl<'a> ToWire for NtlmClientChalenge<'a> {
             }
         }
 
-        buf.put_u32::<LittleEndian>(0); // Reserved4
+        buf.put_u32_le(0); // Reserved4
 
         Ok(self.size())
     }
@@ -588,36 +568,28 @@ mod tests {
     lazy_static! {
         static ref kRandomSessionKey: SessionKey = SessionKey::from_iter(iter::repeat(0x55).take(16));
         static ref kTime: FileTime = FileTime::from(0);
-        static ref kChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_56
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_128
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION
-                                                    | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SEAL
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
-        static ref kClientChallengeFlags: NegotiateFlags = NegotiateFlags::NTLMSSP_NEGOTIATE_56
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
-                                                    | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SEAL
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
-                                                    | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
+        static ref kChallengeFlags: NegotiateFlags =
+            NegotiateFlags::NTLMSSP_NEGOTIATE_KEY_EXCH | NegotiateFlags::NTLMSSP_NEGOTIATE_56
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_128 | NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION
+                | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM | NegotiateFlags::NTLMSSP_NEGOTIATE_SEAL
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
+        static ref kClientChallengeFlags: NegotiateFlags =
+            NegotiateFlags::NTLMSSP_NEGOTIATE_56 | NegotiateFlags::NTLMSSP_NEGOTIATE_VERSION
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY
+                | NegotiateFlags::NTLMSSP_TARGET_TYPE_SERVER | NegotiateFlags::NTLMSSP_NEGOTIATE_ALWAYS_SIGN
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_NTLM | NegotiateFlags::NTLMSSP_NEGOTIATE_SEAL
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_SIGN | NegotiateFlags::NTLMSSP_NEGOTIATE_OEM
+                | NegotiateFlags::NTLMSSP_NEGOTIATE_UNICODE;
         static ref kClientChallenge: ClientChallenge = arr![u8; 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
         static ref kServerChallenge: ServerChallenge = arr![u8; 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
         static ref kSessionBaseKey: SessionKey = arr![u8; 0xd8, 0x72, 0x62, 0xb0, 0xcd, 0xe4, 0xb1, 0xcb,
                                                           0x74, 0x99, 0xbe, 0xcc, 0xcd, 0xf1, 0x07, 0x84];
-        static ref  kNtChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
+        static ref kNtChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
             0x67, 0xc4, 0x30, 0x11, 0xf3, 0x02, 0x98, 0xa2, 0xad, 0x35, 0xec, 0xe6, 0x4f, 0x16, 0x33, 0x1c, 0x44, 0xbd,
             0xbe, 0xd9, 0x27, 0x84, 0x1f, 0x94
         ];
-
         static ref kLmChallengeResponseV1: GenericArray<u8, U24> = arr![u8;
             0x98, 0xde, 0xf7, 0xb8, 0x7f, 0x88, 0xaa, 0x5d, 0xaf, 0xe2, 0xdf, 0x77, 0x96, 0x88, 0xa1, 0x72, 0xde, 0xf1,
             0x1c, 0x7d, 0x5c, 0xcd, 0xef, 0x13
@@ -858,9 +830,8 @@ mod tests {
             } => {
                 assert_eq!(
                     response.as_ref(),
-                    &[
-                        0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb, 0xef, 0x6a, 0x1c
-                    ][..]
+                    &[0x68, 0xcd, 0x0a, 0xb8, 0x51, 0xe5, 0x1c, 0x96, 0xaa, 0xbc, 0x92, 0x7b, 0xeb, 0xef, 0x6a, 0x1c,]
+                        [..]
                 );
 
                 let mut buf = vec![];
@@ -875,9 +846,7 @@ mod tests {
 
         assert_eq!(
             generate_session_base_key_v2(&nt_response_key, nt_proof_str).as_slice(),
-            &[
-                0x8d, 0xe4, 0x0c, 0xca, 0xdb, 0xc1, 0x4a, 0x82, 0xf1, 0x5c, 0xb0, 0xad, 0x0d, 0xe9, 0x5c, 0xa3
-            ][..]
+            &[0x8d, 0xe4, 0x0c, 0xca, 0xdb, 0xc1, 0x4a, 0x82, 0xf1, 0x5c, 0xb0, 0xad, 0x0d, 0xe9, 0x5c, 0xa3,][..]
         );
 
         let lm_response_key = lm_owf_v2(kUsername, kPassword, kDomain);
@@ -887,7 +856,7 @@ mod tests {
             lm_response,
             LmChallengeResponse::V2 {
                 response: (&[
-                    0x86, 0xc3, 0x50, 0x97, 0xac, 0x9c, 0xec, 0x10, 0x25, 0x54, 0x76, 0x4a, 0x57, 0xcc, 0xcc, 0x19
+                    0x86, 0xc3, 0x50, 0x97, 0xac, 0x9c, 0xec, 0x10, 0x25, 0x54, 0x76, 0x4a, 0x57, 0xcc, 0xcc, 0x19,
                 ][..])
                     .into(),
                 challenge: (&[0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA][..]).into(),
